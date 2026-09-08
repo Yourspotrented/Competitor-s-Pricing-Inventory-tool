@@ -1,0 +1,57 @@
+# Secrets — never commit real credentials (REACHPRO_COOKIE, Notion API key,
+# Teams webhook URL, SharePoint client secret all live here)
+backend/.env
+.env
+.env.*
+!.env.example
+!backend/.env.example
+
+# Python virtual environment
+backend/.venv/
+.venv/
+venv/
+
+# Python bytecode caches
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+
+# Local SQLite database — scan results/history, not source
+backend/scarcity.db
+backend/scarcity.db-shm
+backend/scarcity.db-wal
+*.db
+*.db-shm
+*.db-wal
+
+# Logs
+backend/server.log
+*.log
+
+# Build output — vercel-build.sh regenerates out/ from backend/static
+out/
+.vercel/
+
+# Editor / tooling
+.idea/
+*.swp
+
+# OS cruft
+.DS_Store
+Thumbs.db
+
+# Scan input data — committed so a fresh clone has the data the app reads
+# (see facilities.py, our_facility_database.py, events_facilities.py,
+# clusters_export.py). Note: this repo is public.
+
+# Internal team notes — call transcripts, colleague names and pricing strategy.
+# Kept local: this repo is public.
+/CALL_NOTES.md
+/MEETING_NOTES_*.md
+/LYSTED_CSV_TASK.md
+branch_structure.json
+temp_auto_push.bat
+temp_interactive_push.bat
+.gitignore

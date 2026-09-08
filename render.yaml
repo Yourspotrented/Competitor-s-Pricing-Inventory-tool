@@ -1,0 +1,62 @@
+# Render Blueprint — the backend (API + dashboard + hourly schedulers).
+# New Blueprint → connect the repo → Render reads this file.
+#
+# The plan matters: this app runs background schedulers around the clock.
+# Free instances spin down after 15 idle minutes, which stops every scan, so
+# it needs an always-on plan. A persistent disk holds the SQLite database;
+# without one the filesystem is wiped on every deploy, taking the geocode
+# cache, scan history and the alert baseline with it.
+services:
+  - type: web
+    name: competitors-data-finder
+    runtime: python
+    rootDir: backend
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    disk:
+      name: data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.13.7"
+      - key: DATABASE_PATH
+        value: /var/data/scarcity.db
+      # Set these in the Render dashboard (sync: false = prompted, never committed)
+      - key: DASHBOARD_PASSWORD
+        sync: false
+      - key: TEAMS_WEBHOOK_URL
+        sync: false
+      - key: EVENTS_TEAMS_WEBHOOK_URL
+        sync: false
+      - key: LYSTED_TEAMS_WEBHOOK_URL
+        sync: false
+      - key: FACILITY_SCAN_INTERVAL_HOURS
+        value: "1"
+      - key: EVENTS_SCAN_INTERVAL_HOURS
+        value: "1"
+      - key: LYSTED_SCAN_INTERVAL_HOURS
+        value: "3"
+      - key: NOTION_API_KEY
+        sync: false
+      - key: NOTION_STALL_RENTS_DATABASE_ID
+        sync: false
+      - key: SHAREPOINT_TENANT_ID
+        sync: false
+      - key: SHAREPOINT_CLIENT_ID
+        sync: false
+      - key: SHAREPOINT_CLIENT_SECRET
+        sync: false
+      - key: SHAREPOINT_REPORT_SITE_HOST
+        value: yourspotrented.sharepoint.com
+      - key: SHAREPOINT_REPORT_SITE_PATH
+        value: /sites/MaxParkArbLLC
+      - key: SHAREPOINT_REPORT_FOLDER_PATH
+        value: Stubhub Team/Pricing_Alerts
+      # Only needed by the old ReachPro-sourced flow; leave unset otherwise
+      - key: REACHPRO_COOKIE
+        sync: false
+      - key: ACTIVE_ACCOUNT_ID
+        value: 7a13a9c9-4ef4-492e-9eb0-19adcfa79da3

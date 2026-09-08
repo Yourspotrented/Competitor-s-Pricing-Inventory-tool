@@ -1,0 +1,7 @@
+backend/.venv
+backend/__pycache__
+backend/*.db
+backend/server.log
+backend/.env
+*.csv
+*.xlsx
