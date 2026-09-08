@@ -1,0 +1,2083 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Competitor Scarcity Dashboard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --border: #262b36;
+    --text: #e6e9ef;
+    --muted: #8b93a5;
+    --sold-out: #e5484d;
+    --limited: #f5a524;
+    --ok: #3fb950;
+    --unknown: #6b7280;
+    --accent: #5b8cff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+  }
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 20px 28px;
+    border-bottom: 1px solid var(--border);
+  }
+  h1 { font-size: 18px; margin: 0; font-weight: 600; }
+  .sub { color: var(--muted); font-size: 13px; margin-top: 4px; }
+  .controls { display: flex; gap: 10px; align-items: center; }
+  .time-sep { color: var(--muted); font-size: 13px; }
+  button, select {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 8px 14px;
+    border-radius: 6px;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  button.primary { background: var(--accent); border-color: var(--accent); color: white; font-weight: 600; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  .summary { display: flex; gap: 14px; padding: 18px 28px; flex-wrap: wrap; }
+  .stat {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 20px;
+    min-width: 120px;
+  }
+  .stat .n { font-size: 24px; font-weight: 700; }
+  .stat .l { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .stat.clickable { cursor: pointer; transition: border-color 0.12s, background 0.12s; }
+  .stat.clickable:hover { border-color: var(--accent); }
+  .stat.clickable.active { border-color: var(--accent); background: rgba(91,140,255,0.08); }
+  main { padding: 0 28px 40px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th {
+    text-align: left;
+    padding: 10px 12px;
+    color: var(--muted);
+    font-weight: 600;
+    border-bottom: 1px solid var(--border);
+    position: sticky; top: 0; background: var(--bg);
+  }
+  td { padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  tr:hover td { background: rgba(255,255,255,0.02); }
+  .badge {
+    display: inline-block;
+    padding: 3px 9px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+  .badge.sold_out { background: rgba(229,72,77,0.15); color: var(--sold-out); }
+  .badge.limited { background: rgba(245,165,36,0.15); color: var(--limited); }
+  .badge.ok { background: rgba(63,185,80,0.15); color: var(--ok); }
+  .badge.not_found, .badge.unknown { background: rgba(107,114,128,0.15); color: var(--unknown); }
+  .badge.unavailable { background: rgba(229,72,77,0.15); color: var(--sold-out); }
+  .plat { font-weight: 600; text-transform: capitalize; }
+  .muted { color: var(--muted); }
+  .empty { padding: 60px; text-align: center; color: var(--muted); }
+  .price { font-variant-numeric: tabular-nums; }
+  .expand-btn {
+    background: none; border: none; color: var(--muted); cursor: pointer;
+    font-size: 12px; padding: 2px 6px; border-radius: 4px; width: 22px;
+  }
+  .expand-btn:hover { background: var(--panel); color: var(--text); }
+  .lot-detail-row td { padding: 0; border-bottom: 1px solid var(--border); }
+  .lot-detail { padding: 8px 12px 14px 46px; background: rgba(255,255,255,0.015); }
+  .lot-detail table { font-size: 12px; }
+  .lot-detail th { padding: 6px 10px; position: static; }
+  .lot-detail td { padding: 6px 10px; border-bottom: 1px solid rgba(255,255,255,0.04); }
+  .lot-detail .loading, .lot-detail .empty-lots { color: var(--muted); padding: 10px; font-size: 12px; }
+  .our-lot { color: var(--accent); font-weight: 600; }
+  .detail-tabs { display: flex; gap: 4px; margin-bottom: 8px; }
+  .tab-btn {
+    background: none; border: none; color: var(--muted); cursor: pointer;
+    padding: 4px 10px; font-size: 12px; border-radius: 5px;
+  }
+  .tab-btn:hover { background: var(--panel); }
+  .tab-btn.active { background: var(--panel); color: var(--text); font-weight: 600; }
+  .view-tabs { display: flex; gap: 6px; padding: 16px 28px 0; }
+  .view-tab-btn {
+    background: none; border: none; color: var(--muted); cursor: pointer;
+    padding: 8px 16px; font-size: 13px; font-weight: 600; border-radius: 8px 8px 0 0;
+    border-bottom: 2px solid transparent;
+  }
+  .view-tab-btn:hover { color: var(--text); }
+  .view-tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .increase { color: var(--sold-out); font-weight: 700; font-variant-numeric: tabular-nums; }
+  tr.spike-row td { background: rgba(229,72,77,0.08); }
+  tr.spike-row td:first-child { box-shadow: inset 3px 0 0 var(--sold-out); }
+
+  /* facility competitor view */
+  .cluster-group { margin-bottom: 22px; }
+  .cluster-group-head {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 8px 4px; gap: 10px;
+    cursor: pointer; user-select: none;
+    background: none; border: none; width: 100%; text-align: left;
+    font: inherit; color: inherit;
+  }
+  .cluster-group-head:hover .cluster-group-title { color: var(--accent); }
+  .cluster-group-head:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+  .cluster-group-title { display: flex; align-items: center; gap: 8px; }
+  .cluster-chevron {
+    display: inline-flex; width: 14px; height: 14px; color: var(--muted);
+    transition: transform 0.15s ease;
+    flex-shrink: 0;
+  }
+  .cluster-group.collapsed .cluster-chevron { transform: rotate(-90deg); }
+  .cluster-group-head h3 {
+    font-size: 12.5px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;
+    color: var(--text); margin: 0;
+  }
+  .cluster-group-head .meta { font-size: 12px; color: var(--muted); }
+  .cluster-group.collapsed .tbl-shell { display: none; }
+  .cluster-group .tbl-shell { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; margin-bottom: 12px; }
+  .cluster-group .tbl-shell:last-child { margin-bottom: 0; }
+  .cluster-group table { font-size: 13px; }
+  tr.row-error td { background: rgba(229,72,77,0.06); }
+  tr.row-error:hover td { background: rgba(229,72,77,0.1); }
+  .id-cell { color: var(--muted); font-variant-numeric: tabular-nums; }
+
+  .radius-group-banner {
+    display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap;
+    gap: 8px 16px;
+    padding: 10px 14px;
+    background: rgba(91,140,255,0.06);
+    border-bottom: 1px solid var(--border);
+    font-size: 12.5px;
+  }
+  .radius-group-banner .rg-label { color: var(--muted); }
+  .radius-group-banner .rg-numbers { display: flex; align-items: center; gap: 14px; font-variant-numeric: tabular-nums; }
+  .radius-group-banner .rg-total { font-size: 15px; font-weight: 700; color: var(--text); }
+  .radius-group-banner .rg-count { color: var(--muted); }
+  button.radius-group-banner.rg-clickable {
+    width: 100%; cursor: pointer; font: inherit; color: inherit; border: none; border-bottom: 1px solid var(--border);
+  }
+  button.radius-group-banner.rg-clickable:hover { background: rgba(91,140,255,0.11); }
+  button.radius-group-banner.rg-clickable:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  button.radius-group-banner.rg-parkwhiz { background: rgba(255,255,255,0.02); padding-top: 8px; padding-bottom: 8px; }
+  button.radius-group-banner.rg-parkwhiz .rg-label { font-size: 12px; }
+  button.radius-group-banner.rg-parkwhiz:hover { background: rgba(255,255,255,0.05); }
+  .radius-group-banner .rg-label svg { width: 11px; height: 11px; margin-left: 4px; vertical-align: -1px; transform: rotate(0deg); }
+  .lookup-match {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    width: 100%; text-align: left; font: inherit; color: var(--text);
+    background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+    padding: 9px 14px; margin-bottom: 6px; cursor: pointer; font-size: 13px;
+  }
+  .lookup-match:hover { border-color: var(--accent); }
+  .lookup-match .muted { font-size: 12px; }
+  .lookup-section-title {
+    font-size: 12.5px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;
+    color: var(--muted); margin: 18px 0 8px;
+  }
+  .lookup-summary-cards { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 4px; }
+  .lots-panel { background: rgba(255,255,255,0.015); border-bottom: 1px solid var(--border); }
+  .lots-panel .lot-detail { padding: 10px 14px; }
+  .lots-panel table { font-size: 12.5px; }
+  .lots-panel th { position: static; padding: 6px 10px; }
+  .lots-panel td { padding: 6px 10px; }
+  .facility-controls { display: flex; align-items: center; gap: 10px; padding: 16px 28px 0; flex-wrap: wrap; }
+  .facility-controls input[type="search"] {
+    flex: 1; min-width: 220px; background: var(--panel); border: 1px solid var(--border);
+    color: var(--text); padding: 8px 12px; border-radius: 6px; font-size: 13px;
+  }
+  .facility-filter-btn {
+    background: var(--panel); border: 1px solid var(--border); color: var(--muted);
+    padding: 7px 12px; border-radius: 6px; font-size: 12px; cursor: pointer;
+  }
+  .facility-filter-btn.active { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+  .scan-status-line { padding: 0 28px; font-size: 13px; color: var(--muted); display: flex; align-items: center; gap: 8px; }
+  .spinner {
+    width: 12px; height: 12px; border-radius: 50%;
+    border: 2px solid var(--border); border-top-color: var(--accent);
+    animation: spin 0.7s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  input[type="file"].file-pick {
+    background: var(--panel); border: 1px solid var(--border); color: var(--muted);
+    padding: 6px 10px; border-radius: 6px; font-size: 12px; max-width: 280px;
+  }
+  input[type="file"].file-pick::file-selector-button {
+    background: var(--bg); border: 1px solid var(--border); color: var(--text);
+    padding: 4px 10px; border-radius: 5px; margin-right: 8px; cursor: pointer; font-size: 12px;
+  }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1 id="pageTitle">Competitor Scarcity Dashboard</h1>
+    <div class="sub" id="pageSub">Events where SpotHero / ParkWhiz are running low or sold out &mdash; potential price-raise opportunities on ReachPro</div>
+  </div>
+  <div class="controls" id="eventControls">
+    <select id="regionFilter">
+      <option value="">All Regions</option>
+      <option value="north_east">North East</option>
+      <option value="south_east">South East</option>
+      <option value="mid_western">Mid Western</option>
+      <option value="south_west">South West</option>
+    </select>
+    <select id="scarcityFilter">
+      <option value="">Limited + Sold Out</option>
+      <option value="sold_out">Sold Out only</option>
+      <option value="limited">Limited only</option>
+      <option value="ok">OK only</option>
+      <option value="not_found">Not Found (unverified)</option>
+      <option value="all">All scanned events</option>
+    </select>
+    <select id="platformFilter">
+      <option value="">All platforms</option>
+      <option value="spothero">SpotHero</option>
+      <option value="parkwhiz">ParkWhiz</option>
+    </select>
+    <button id="refreshBtn">Refresh</button>
+    <button id="scanBtn" class="primary">Run Scan</button>
+    <button id="stopBtn" style="display:none;">Stop</button>
+  </div>
+  <div class="controls" id="facilityControls" style="display:none;">
+    <select id="facilityRadius">
+      <option value="0.1">0.1 mi radius</option>
+      <option value="0.5" selected>0.5 mi radius</option>
+      <option value="0.7">0.7 mi radius</option>
+      <option value="1.0">1.0 mi radius</option>
+    </select>
+    <select id="facilityStartHour" title="Booking window start"></select>
+    <span class="time-sep">–</span>
+    <select id="facilityEndHour" title="Booking window end"></select>
+    <button id="facilityRefreshBtn">Refresh</button>
+    <button id="facilityScanBtn" class="primary">Run Facility Scan</button>
+    <button id="ourInventorySyncBtn" title="Pull our own facility data from Notion">Sync Our Inventory</button>
+    <button id="fdbImportBtn" title="Re-read the FACILITY DATABASE CSV file on disk">Import Facility Database</button>
+  </div>
+  <div class="controls" id="eventsControls" style="display:none;">
+    <select id="eventsRadius">
+      <option value="0.1" selected>0.1 mi radius</option>
+      <option value="0.25">0.25 mi radius</option>
+      <option value="0.5">0.5 mi radius</option>
+      <option value="0.7">0.7 mi radius</option>
+      <option value="1.0">1.0 mi radius</option>
+    </select>
+    <select id="eventsStartHour" title="Booking window start"></select>
+    <span class="time-sep">–</span>
+    <select id="eventsEndHour" title="Booking window end"></select>
+    <button id="eventsRefreshBtn">Refresh</button>
+    <button id="eventsScanBtn" class="primary">Run Events Scan</button>
+  </div>
+  <div class="controls" id="lystedControls" style="display:none;">
+    <input type="file" id="lystedFile" class="file-pick" accept=".csv,text/csv" title="Lysted inventory export (.csv)" />
+    <button id="lystedUploadBtn">Upload Export</button>
+    <button id="lystedRefreshBtn">Refresh</button>
+    <button id="lystedScanBtn" class="primary">Check Now</button>
+  </div>
+</header>
+<div id="scanEta" class="sub" style="padding: 0 28px; display:none;"></div>
+<div id="ourInventorySyncStatus" class="scan-status-line" style="display:none;"></div>
+<div id="fdbImportStatus" class="scan-status-line" style="display:none;"></div>
+<div id="facilityScanStatus" class="scan-status-line" style="display:none;"></div>
+<div id="eventsScanStatus" class="scan-status-line" style="display:none;"></div>
+<div id="lystedUploadStatus" class="scan-status-line" style="display:none;"></div>
+<div id="lystedScanStatus" class="scan-status-line" style="display:none;"></div>
+
+<div class="view-tabs">
+  <!-- The event-level Scarcity and Price Spikes views (ReachPro listings) are
+       hidden — the team works out of the facility/events portfolio scans. The
+       views and their code are left intact; delete these two display:none's to
+       bring the tabs back. -->
+  <button class="view-tab-btn" id="viewScarcityBtn" style="display:none;">Scarcity</button>
+  <button class="view-tab-btn" id="viewSpikesBtn" style="display:none;">Price Spikes</button>
+  <button class="view-tab-btn active" id="viewFacilitiesBtn">Facility Competitors</button>
+  <button class="view-tab-btn" id="viewEventsBtn">Events Competitors</button>
+  <button class="view-tab-btn" id="viewLystedBtn">Lysted Listings</button>
+</div>
+
+<div class="summary" id="summary"></div>
+
+<main id="scarcityView">
+  <table>
+    <thead>
+      <tr>
+        <th></th>
+        <th>Event</th>
+        <th>Venue</th>
+        <th>Date</th>
+        <th>Region</th>
+        <th>Our Price</th>
+        <th>Platform</th>
+        <th>Competitor Price</th>
+        <th>Availability</th>
+        <th>Status</th>
+        <th>Checked</th>
+      </tr>
+    </thead>
+    <tbody id="rows"></tbody>
+  </table>
+  <div id="emptyState" class="empty" style="display:none;">No scarce competitor listings found yet. Click "Run Scan" to check now.</div>
+</main>
+
+<main id="spikesView" style="display:none;">
+  <table>
+    <thead>
+      <tr>
+        <th></th>
+        <th>Event</th>
+        <th>Date</th>
+        <th>Region</th>
+        <th>Platform</th>
+        <th>Lot</th>
+        <th>Previous Price</th>
+        <th>Current Price</th>
+        <th>Increase</th>
+        <th>Detected</th>
+      </tr>
+    </thead>
+    <tbody id="spikeRows"></tbody>
+  </table>
+  <div id="spikesEmptyState" class="empty" style="display:none;">No significant price increases detected yet. Run a scan, then run it again later to compare.</div>
+</main>
+
+<main id="facilitiesView" style="display:none;">
+  <div class="view-tabs" style="padding: 16px 28px 0;">
+    <button class="view-tab-btn active" id="viewFacilityListBtn" style="font-size:13px;padding:6px 14px;">Facilities</button>
+    <button class="view-tab-btn" id="viewFacilitySpikesBtn" style="font-size:13px;padding:6px 14px;">Price Spikes</button>
+    <button class="view-tab-btn" id="viewFacilityLookupBtn" style="font-size:13px;padding:6px 14px;">Lookup</button>
+  </div>
+  <div id="facilitySchedulerStatus" class="scan-status-line" style="padding: 8px 28px 0;"></div>
+
+  <div id="facilityListSubview">
+    <div class="facility-controls">
+      <input type="search" id="facilitySearch" placeholder="Filter by facility name, cluster, or id…" />
+      <button class="facility-filter-btn active" data-filter="all">All</button>
+      <button class="facility-filter-btn" data-filter="filled">Has data</button>
+      <button class="facility-filter-btn" data-filter="limited">Any limited</button>
+      <button class="facility-filter-btn" data-filter="error">Needs address</button>
+    </div>
+    <div id="facilityClusters" style="padding: 16px 28px;"></div>
+    <div id="facilitiesEmptyState" class="empty" style="display:none;">No facility competitor data yet. Click "Run Facility Scan" to check now.</div>
+  </div>
+
+  <div id="facilitySpikesSubview" style="display:none; padding: 16px 28px;">
+    <div id="facilitySpikesCaption" class="sub" style="margin-bottom:10px;"></div>
+    <div class="tbl-shell">
+      <table>
+        <thead>
+          <tr><th>Cluster</th><th>Facility (sample)</th><th>Platform</th><th>Lot</th><th>Previous</th><th>Current</th><th>Increase</th><th>Notified</th><th>Detected</th></tr>
+        </thead>
+        <tbody id="facilitySpikeRows"></tbody>
+      </table>
+    </div>
+    <div id="facilitySpikesEmptyState" class="empty" style="display:none;">No SpotHero price spikes in the latest scan. This view shows one scan at a time, so an empty table means competitor prices were steady — not that the scan didn't run.</div>
+  </div>
+
+  <div id="facilityLookupSubview" style="display:none; padding: 16px 28px;">
+    <div class="facility-controls" style="padding: 0 0 12px;">
+      <input type="search" id="lookupSearch" placeholder="Type a facility name, id, or cluster (e.g. 1 Emmet, 81099, Orleans)…" />
+    </div>
+    <div id="lookupMatches" style="margin-bottom: 16px;"></div>
+    <div id="lookupDetail"></div>
+  </div>
+</main>
+
+<main id="eventsView" style="display:none;">
+  <div class="view-tabs" style="padding: 16px 28px 0;">
+    <button class="view-tab-btn active" id="viewEventsListBtn" style="font-size:13px;padding:6px 14px;">Facilities</button>
+    <button class="view-tab-btn" id="viewEventsSpikesBtn" style="font-size:13px;padding:6px 14px;">Price Spikes</button>
+    <button class="view-tab-btn" id="viewEventsLowInvBtn" style="font-size:13px;padding:6px 14px;">Low Inventory</button>
+  </div>
+  <div id="eventsSchedulerStatus" class="scan-status-line" style="padding: 8px 28px 0;"></div>
+
+  <div id="eventsListSubview">
+    <div class="facility-controls">
+      <input type="search" id="eventsSearch" placeholder="Filter by facility name or id…" />
+      <button class="facility-filter-btn events-filter-btn active" data-filter="all">All</button>
+      <button class="facility-filter-btn events-filter-btn" data-filter="filled">Has data</button>
+      <button class="facility-filter-btn events-filter-btn" data-filter="limited">Any limited</button>
+      <button class="facility-filter-btn events-filter-btn" data-filter="error">Needs address</button>
+    </div>
+    <div id="eventsClusters" style="padding: 16px 28px;"></div>
+    <div id="eventsEmptyState" class="empty" style="display:none;">No Events-team competitor data yet. Click "Run Events Scan" to check now — the scheduler also runs automatically.</div>
+  </div>
+
+  <div id="eventsSpikesSubview" style="display:none; padding: 16px 28px;">
+    <div id="eventsSpikesCaption" class="sub" style="margin-bottom:10px;"></div>
+    <div class="tbl-shell">
+      <table>
+        <thead>
+          <tr><th>Facility (sample)</th><th>Platform</th><th>Lot</th><th>Previous</th><th>Current</th><th>Increase</th><th>Notified</th><th>Detected</th></tr>
+        </thead>
+        <tbody id="eventsSpikeRows"></tbody>
+      </table>
+    </div>
+    <div id="eventsSpikesEmptyState" class="empty" style="display:none;">No SpotHero price spikes in the latest scan. This view shows one scan at a time, so an empty table means competitor prices were steady — not that the scan didn't run.</div>
+  </div>
+
+  <div id="eventsLowInvSubview" style="display:none; padding: 16px 28px;">
+    <div id="eventsLowInvCaption" class="sub" style="margin-bottom:10px;"></div>
+    <div class="tbl-shell">
+      <table>
+        <thead>
+          <tr><th>Facility (sample)</th><th>Platform</th><th>Lot</th><th>Spots left</th><th>Capacity</th><th>% remaining</th><th>Previous %</th><th>Notified</th><th>Detected</th></tr>
+        </thead>
+        <tbody id="eventsLowInvRows"></tbody>
+      </table>
+    </div>
+    <div id="eventsLowInvEmptyState" class="empty" style="display:none;">No low-inventory crossings in the latest scan. This view shows one scan at a time, so an empty table means no competitor newly dropped below 20% remaining.</div>
+  </div>
+</main>
+
+<main id="lystedView" style="display:none;">
+  <div class="view-tabs" style="padding: 16px 28px 0;">
+    <button class="view-tab-btn active" id="viewLystedListBtn" style="font-size:13px;padding:6px 14px;">Listings</button>
+    <button class="view-tab-btn" id="viewLystedAlertsBtn" style="font-size:13px;padding:6px 14px;">Sold-out Alerts</button>
+  </div>
+  <div id="lystedSchedulerStatus" class="scan-status-line" style="padding: 8px 28px 0;"></div>
+
+  <div id="lystedListSubview">
+    <div class="facility-controls">
+      <input type="search" id="lystedSearch" placeholder="Filter by event, venue, city, or lot…" />
+      <button class="facility-filter-btn lysted-filter-btn active" data-filter="all">All</button>
+      <button class="facility-filter-btn lysted-filter-btn" data-filter="sold_out">Sold out at source</button>
+      <button class="facility-filter-btn lysted-filter-btn" data-filter="limited">Limited</button>
+      <button class="facility-filter-btn lysted-filter-btn" data-filter="not_found">Not found</button>
+      <button class="facility-filter-btn lysted-filter-btn" data-filter="unchecked">Not checked</button>
+    </div>
+    <div style="padding: 12px 28px 0;">
+      <div id="lystedCaption" class="sub" style="margin-bottom:10px;"></div>
+      <div class="tbl-shell">
+        <table>
+          <thead>
+            <tr><th>Event</th><th>Date</th><th>Venue</th><th title="The parking lot behind the listing — Lysted's Section column">Lot</th><th>Qty</th><th>List</th><th title="Availability of that lot on SpotHero for the event window">SpotHero</th><th title="Availability of that lot on ParkWhiz for the event window">ParkWhiz</th><th>Checked</th></tr>
+          </thead>
+          <tbody id="lystedRows"></tbody>
+        </table>
+      </div>
+      <div id="lystedEmptyState" class="empty" style="display:none;">No Lysted export uploaded yet. Choose the CSV the listing team exported and click "Upload Export".</div>
+    </div>
+  </div>
+
+  <div id="lystedAlertsSubview" style="display:none; padding: 16px 28px;">
+    <div id="lystedAlertsCaption" class="sub" style="margin-bottom:10px;"></div>
+    <div class="tbl-shell">
+      <table>
+        <thead>
+          <tr><th>Event</th><th>Date</th><th>Venue</th><th>Lot</th><th>Sold out on</th><th>Qty</th><th>List</th><th>Was showing</th><th>Notified</th><th>Detected</th></tr>
+        </thead>
+        <tbody id="lystedAlertRows"></tbody>
+      </table>
+    </div>
+    <div id="lystedAlertsEmptyState" class="empty" style="display:none;">No listings have gone sold-out at source in the latest check. This view shows one check at a time, so an empty table means every live listing can still be fulfilled.</div>
+  </div>
+</main>
+
+<script src="config.js"></script>
+<script>
+// ---------------------------------------------------------------------------
+// Where the API lives, and how to get past the password gate.
+//
+// Served by the backend itself, config.js sets API_BASE to "" and every
+// /api call stays relative. Hosted separately (Vercel), config.js points
+// API_BASE at the backend on Render and the calls go cross-origin. Either
+// way this shim rewrites the URL, and — when the backend has
+// DASHBOARD_PASSWORD set — answers its 401 by asking once for the password
+// and sending it as X-Dashboard-Key on every call after that.
+// ---------------------------------------------------------------------------
+const API_BASE = String(window.API_BASE || '').replace(/\/+$/, '');
+const DASHBOARD_KEY_STORAGE = 'competitorsDashboardKey';
+const _nativeFetch = window.fetch.bind(window);
+
+function _storedKey() { try { return localStorage.getItem(DASHBOARD_KEY_STORAGE) || ''; } catch (e) { return ''; } }
+function _storeKey(k) { try { localStorage.setItem(DASHBOARD_KEY_STORAGE, k); } catch (e) {} }
+
+window.fetch = async function (input, init) {
+  init = init || {};
+  let url = typeof input === 'string' ? input : input.url;
+  if (url.startsWith('/api')) url = API_BASE + url;
+  const headers = new Headers(init.headers || {});
+  const key = _storedKey();
+  if (key) headers.set('X-Dashboard-Key', key);
+  let res = await _nativeFetch(url, { ...init, headers });
+  if (res.status === 401) {
+    const entered = window.prompt('This dashboard is password protected. Enter the password:');
+    if (entered) {
+      _storeKey(entered);
+      headers.set('X-Dashboard-Key', entered);
+      res = await _nativeFetch(url, { ...init, headers });
+    }
+  }
+  return res;
+};
+
+const $ = (id) => document.getElementById(id);
+
+function fmtMoney(v) { return v == null ? '—' : '$' + Number(v).toFixed(2); }
+function fmtDate(iso) { if (!iso) return '—'; const d = new Date(iso); return d.toLocaleString(); }
+
+// ParkWhiz statuses: available/limited/sold_out are documented; "unavailable"
+// also shows up in practice (price $0 alongside it) but isn't one of the
+// three ParkWhiz documents — treated as its own state, same severity color
+// as sold_out since either way it can't be booked, but not relabeled as
+// "sold out" since we don't actually know that's the reason.
+const PARKWHIZ_BADGE_CLASS = {
+  available: 'ok', limited: 'limited', sold_out: 'sold_out', unavailable: 'unavailable',
+};
+function parkwhizBadgeClass(status) {
+  return PARKWHIZ_BADGE_CLASS[status] || 'unknown';
+}
+
+function availabilityText(row) {
+  if (row.platform === 'spothero') {
+    if (row.spots_left == null) return '—';
+    const pct = row.percent_remaining != null ? ` (${row.percent_remaining}%)` : '';
+    return `${row.spots_left} left${pct}`;
+  }
+  return row.availability_status || '—';
+}
+
+// Tiles that filter the Scarcity table by scarcity_level. Each maps to a
+// dropdown option value ("" = the default Limited+SoldOut combo, "all" = no filter).
+const SCARCITY_TILES = [
+  { key: 'sold_out',    label: 'Sold Out',      filterValue: 'sold_out' },
+  { key: 'limited',     label: 'Limited',       filterValue: 'limited' },
+  { key: 'ok',          label: 'OK',            filterValue: 'ok' },
+  { key: 'not_found',   label: 'Not Found',     filterValue: 'not_found' },
+  { key: 'price_spikes',label: 'Price Spikes',  filterValue: null }, // navigates to Price Spikes tab instead of filtering
+  { key: 'total',       label: 'Total Checked', filterValue: 'all' },
+];
+
+async function loadSummary() {
+  const region = $('regionFilter').value;
+  const params = new URLSearchParams();
+  if (region) params.set('region', region);
+  const res = await fetch('/api/dashboard/summary?' + params.toString());
+  const s = await res.json();
+
+  const currentFilter = $('scarcityFilter').value;
+  const onScarcityView = $('scarcityView').style.display !== 'none';
+
+  $('summary').innerHTML = SCARCITY_TILES.map(t => {
+    const isActive = t.filterValue !== null && onScarcityView && currentFilter === t.filterValue;
+    return `
+      <div class="stat clickable${isActive ? ' active' : ''}" data-tile="${t.key}" data-filter="${t.filterValue ?? ''}">
+        <div class="n">${s[t.key]}</div><div class="l">${t.label}</div>
+      </div>
+    `;
+  }).join('');
+
+  $('summary').querySelectorAll('.stat[data-tile]').forEach(el => {
+    el.addEventListener('click', () => {
+      const tileKey = el.dataset.tile;
+      if (tileKey === 'price_spikes') {
+        switchView('spikes');
+        loadSummary();
+        return;
+      }
+      switchView('scarcity');
+      $('scarcityFilter').value = el.dataset.filter;
+      refresh();
+    });
+  });
+}
+
+async function loadSpikeRows() {
+  const region = $('regionFilter').value;
+  const platform = $('platformFilter').value;
+  const params = new URLSearchParams();
+  if (region) params.set('region', region);
+  if (platform) params.set('platform', platform);
+  const res = await fetch('/api/price-spikes?' + params.toString());
+  const rows = await res.json();
+  const tbody = $('spikeRows');
+  tbody.innerHTML = '';
+  $('spikesEmptyState').style.display = rows.length ? 'none' : 'block';
+
+  for (const r of rows) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td><button class="expand-btn" data-action="toggle">▸</button></td>
+      <td>${r.event_name || '—'}</td>
+      <td class="muted">${r.event_date || '—'}</td>
+      <td class="muted">${r.region || '—'}</td>
+      <td class="plat">${r.platform}</td>
+      <td>${r.lot_name || r.lot_address || '—'}</td>
+      <td class="price">${fmtMoney(r.previous_price)}</td>
+      <td class="price">${fmtMoney(r.current_price)}</td>
+      <td class="increase">+${r.percent_increase}%</td>
+      <td class="muted">${fmtDate(r.detected_at)}</td>
+    `;
+    tr.dataset.spike = JSON.stringify({
+      reachpro_event_id: r.reachpro_event_id,
+      platform: r.platform,
+      lot_name: r.lot_name,
+      lot_address: r.lot_address,
+    });
+    tbody.appendChild(tr);
+
+    const detailRow = document.createElement('tr');
+    detailRow.className = 'lot-detail-row';
+    detailRow.style.display = 'none';
+    detailRow.innerHTML = `<td colspan="10"><div class="lot-detail"></div></td>`;
+    tbody.appendChild(detailRow);
+
+    tr.querySelector('[data-action="toggle"]').addEventListener('click', () => toggleSpikeDetail(tr, detailRow));
+  }
+}
+
+async function toggleSpikeDetail(tr, detailRow) {
+  const btn = tr.querySelector('[data-action="toggle"]');
+  const isOpen = detailRow.style.display !== 'none';
+  if (isOpen) {
+    detailRow.style.display = 'none';
+    btn.textContent = '▸';
+    return;
+  }
+  detailRow.style.display = '';
+  btn.textContent = '▾';
+
+  const detail = detailRow.querySelector('.lot-detail');
+  const spike = JSON.parse(tr.dataset.spike);
+  detail.innerHTML = `<div class="loading">Loading price history…</div>`;
+
+  if (!spike.reachpro_event_id) {
+    detail.innerHTML = `<div class="empty-lots">No event id to look up history.</div>`;
+    return;
+  }
+
+  const params = new URLSearchParams({
+    reachpro_event_id: spike.reachpro_event_id,
+    platform: spike.platform || '',
+    lot_name: spike.lot_name || '',
+    lot_address: spike.lot_address || '',
+  });
+  try {
+    const res = await fetch('/api/event-lots/history?' + params.toString());
+    const rows = await res.json();
+    if (!rows.length) {
+      detail.innerHTML = `<div class="empty-lots">No price history recorded for this lot yet.</div>`;
+      return;
+    }
+    // rows are newest-first; each row's "previous" reading is the next one
+    // in the array (the next-older scan) — compute % change vs. that to
+    // find and highlight the exact jump that crossed the spike threshold.
+    const SPIKE_THRESHOLD = 20;
+    const rowsHtml = rows.map((r, i) => {
+      const prev = rows[i + 1];
+      let changeHtml = '<span class="muted">—</span>';
+      let isSpike = false;
+      if (prev && prev.price != null && r.price != null && prev.price > 0) {
+        const pctChange = (r.price - prev.price) / prev.price * 100;
+        isSpike = pctChange >= SPIKE_THRESHOLD;
+        const sign = pctChange >= 0 ? '+' : '';
+        changeHtml = `<span class="${isSpike ? 'increase' : 'muted'}">${sign}${pctChange.toFixed(1)}%</span>`;
+      }
+      return `
+      <tr class="${isSpike ? 'spike-row' : ''}">
+        <td class="muted">${fmtDate(r.checked_at)}</td>
+        <td class="price">${fmtMoney(r.price)}</td>
+        <td>${changeHtml}</td>
+        <td>${availabilityText(r)}</td>
+        <td><span class="badge ${r.scarcity_level}">${(r.scarcity_level || 'unknown').replace('_',' ')}</span></td>
+      </tr>
+    `;
+    }).join('');
+    detail.innerHTML = `
+      <table>
+        <thead><tr><th>Checked</th><th>Price</th><th>Change</th><th>Availability</th><th>Status</th></tr></thead>
+        <tbody>${rowsHtml}</tbody>
+      </table>
+    `;
+  } catch (e) {
+    detail.innerHTML = `<div class="empty-lots">Failed to load price history.</div>`;
+  }
+}
+
+async function loadRows() {
+  const scarcity = $('scarcityFilter').value;
+  const platform = $('platformFilter').value;
+  const region = $('regionFilter').value;
+  const params = new URLSearchParams();
+  if (scarcity) params.set('scarcity', scarcity);
+  if (platform) params.set('platform', platform);
+  if (region) params.set('region', region);
+  if (scarcity === 'all') params.set('limit', '1000'); // avoid truncating the "show everything" view
+  const res = await fetch('/api/dashboard?' + params.toString());
+  const rows = await res.json();
+
+  const tbody = $('rows');
+  tbody.innerHTML = '';
+  $('emptyState').style.display = rows.length ? 'none' : 'block';
+
+  for (const r of rows) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td><button class="expand-btn" data-action="toggle">▸</button></td>
+      <td>${r.event_name || '—'}</td>
+      <td class="muted">${r.event_venue || '—'}</td>
+      <td class="muted">${r.event_date || '—'}</td>
+      <td class="muted">${r.region || '—'}</td>
+      <td class="price">${fmtMoney(r.our_price)}</td>
+      <td class="plat">${r.platform}</td>
+      <td class="price">${fmtMoney(r.competitor_price)}</td>
+      <td>${availabilityText(r)}</td>
+      <td><span class="badge ${r.scarcity_level}">${(r.scarcity_level || 'unknown').replace('_',' ')}</span></td>
+      <td class="muted">${fmtDate(r.checked_at)}</td>
+    `;
+    tr.dataset.event = JSON.stringify({
+      event_name: r.event_name, event_date: r.event_date,
+      event_venue: r.event_venue, section: r.section,
+      reachpro_event_id: r.reachpro_event_id,
+    });
+    tbody.appendChild(tr);
+
+    const detailRow = document.createElement('tr');
+    detailRow.className = 'lot-detail-row';
+    detailRow.style.display = 'none';
+    detailRow.innerHTML = `<td colspan="11"><div class="lot-detail"></div></td>`;
+    tbody.appendChild(detailRow);
+
+    tr.querySelector('[data-action="toggle"]').addEventListener('click', () => toggleLotDetail(tr, detailRow));
+  }
+}
+
+async function toggleLotDetail(tr, detailRow) {
+  const btn = tr.querySelector('[data-action="toggle"]');
+  const isOpen = detailRow.style.display !== 'none';
+  if (isOpen) {
+    detailRow.style.display = 'none';
+    btn.textContent = '▸';
+    return;
+  }
+  detailRow.style.display = '';
+  btn.textContent = '▾';
+
+  const detail = detailRow.querySelector('.lot-detail');
+  const ev = JSON.parse(tr.dataset.event);
+  detail.innerHTML = `
+    <div class="detail-tabs">
+      <button class="tab-btn active" data-tab="current">Current Lots</button>
+      <button class="tab-btn" data-tab="history">Past Readings</button>
+    </div>
+    <div class="tab-panel" data-panel="current"><div class="loading">Loading nearby lots…</div></div>
+    <div class="tab-panel" data-panel="history" style="display:none;"></div>
+  `;
+
+  detail.querySelectorAll('.tab-btn').forEach(b => b.addEventListener('click', () => {
+    detail.querySelectorAll('.tab-btn').forEach(x => x.classList.remove('active'));
+    b.classList.add('active');
+    detail.querySelectorAll('.tab-panel').forEach(p => p.style.display = 'none');
+    const panel = detail.querySelector(`[data-panel="${b.dataset.tab}"]`);
+    panel.style.display = '';
+    if (b.dataset.tab === 'history' && !panel.dataset.loaded) loadHistoryPanel(panel, ev);
+  }));
+
+  loadCurrentLotsPanel(detail.querySelector('[data-panel="current"]'), ev);
+}
+
+async function loadCurrentLotsPanel(panel, ev) {
+  const params = new URLSearchParams({
+    event_name: ev.event_name || '', event_date: ev.event_date || '',
+    event_venue: ev.event_venue || '', our_section: ev.section || '',
+    reachpro_event_id: ev.reachpro_event_id || '',
+  });
+  try {
+    const res = await fetch('/api/event-lots?' + params.toString());
+    const lots = await res.json();
+    if (!lots.length) {
+      panel.innerHTML = `<div class="empty-lots">No competing lots found for this event.</div>`;
+      return;
+    }
+    const rowsHtml = lots.map(l => `
+      <tr class="${l.is_our_lot ? 'our-lot' : ''}">
+        <td>${l.platform}</td>
+        <td>${l.lot_name || l.lot_address || '—'}${l.is_our_lot ? ' (our lot)' : ''}</td>
+        <td class="price">${fmtMoney(l.price)}</td>
+        <td>${availabilityText(l)}</td>
+        <td><span class="badge ${l.scarcity_level}">${(l.scarcity_level || 'unknown').replace('_',' ')}</span></td>
+      </tr>
+    `).join('');
+    panel.innerHTML = `
+      <table>
+        <thead><tr><th>Platform</th><th>Lot</th><th>Price</th><th>Availability</th><th>Status</th></tr></thead>
+        <tbody>${rowsHtml}</tbody>
+      </table>
+    `;
+  } catch (e) {
+    panel.innerHTML = `<div class="empty-lots">Failed to load lots.</div>`;
+  }
+}
+
+async function loadHistoryPanel(panel, ev) {
+  panel.innerHTML = `<div class="loading">Loading history…</div>`;
+  panel.dataset.loaded = '1';
+  if (!ev.reachpro_event_id) {
+    panel.innerHTML = `<div class="empty-lots">No event id to look up history.</div>`;
+    return;
+  }
+  try {
+    const res = await fetch('/api/dashboard/history?reachpro_event_id=' + encodeURIComponent(ev.reachpro_event_id));
+    const rows = await res.json();
+    if (!rows.length) {
+      panel.innerHTML = `<div class="empty-lots">No past scans recorded for this event yet.</div>`;
+      return;
+    }
+    const rowsHtml = rows.map(r => `
+      <tr>
+        <td class="muted">${fmtDate(r.checked_at)}</td>
+        <td>${r.platform}</td>
+        <td class="price">${fmtMoney(r.competitor_price)}</td>
+        <td>${availabilityText(r)}</td>
+        <td><span class="badge ${r.scarcity_level}">${(r.scarcity_level || 'unknown').replace('_',' ')}</span></td>
+      </tr>
+    `).join('');
+    panel.innerHTML = `
+      <table>
+        <thead><tr><th>Checked</th><th>Platform</th><th>Price</th><th>Availability</th><th>Status</th></tr></thead>
+        <tbody>${rowsHtml}</tbody>
+      </table>
+    `;
+  } catch (e) {
+    panel.innerHTML = `<div class="empty-lots">Failed to load history.</div>`;
+  }
+}
+
+async function refresh() {
+  await Promise.all([loadSummary(), loadRows(), loadSpikeRows()]);
+}
+
+const VIEW_COPY = {
+  scarcity: {
+    title: 'Competitor Scarcity Dashboard',
+    sub: 'Events where SpotHero / ParkWhiz are running low or sold out — potential price-raise opportunities on ReachPro',
+  },
+  spikes: {
+    title: 'Competitor Price Spikes',
+    sub: 'Lots where competitor pricing jumped 20%+ vs. their previous reading — unusual demand worth reviewing',
+  },
+  facilities: {
+    title: 'Facility Competitor Scan',
+    sub: 'Competitor inventory found within radius of each of our facilities — grouped by the sheet’s cluster, powered by radius-clustered SpotHero searches',
+  },
+  lysted: {
+    title: 'Lysted Listings',
+    sub: 'Our live Lysted listings checked against the buying platforms — anything sold out at source can no longer be fulfilled and needs deactivating',
+  },
+  events: {
+    title: 'Events Competitor Scan',
+    sub: 'Competitor inventory around the Events team’s facility portfolio (Rex’s sheet) — separate pipeline, radius, and Teams alerts from the pricing flow',
+  },
+};
+
+const PORTFOLIO_VIEWS = ['facilities', 'events', 'lysted'];  // own header controls, no summary tiles
+function switchView(view) {
+  $('scarcityView').style.display = view === 'scarcity' ? '' : 'none';
+  $('spikesView').style.display = view === 'spikes' ? '' : 'none';
+  $('facilitiesView').style.display = view === 'facilities' ? '' : 'none';
+  $('eventsView').style.display = view === 'events' ? '' : 'none';
+  $('lystedView').style.display = view === 'lysted' ? '' : 'none';
+  $('viewScarcityBtn').classList.toggle('active', view === 'scarcity');
+  $('viewSpikesBtn').classList.toggle('active', view === 'spikes');
+  $('viewFacilitiesBtn').classList.toggle('active', view === 'facilities');
+  $('viewEventsBtn').classList.toggle('active', view === 'events');
+  $('viewLystedBtn').classList.toggle('active', view === 'lysted');
+
+  const portfolio = PORTFOLIO_VIEWS.includes(view);
+  $('eventControls').style.display = portfolio ? 'none' : '';
+  $('facilityControls').style.display = view === 'facilities' ? '' : 'none';
+  $('eventsControls').style.display = view === 'events' ? '' : 'none';
+  $('lystedControls').style.display = view === 'lysted' ? '' : 'none';
+  $('scarcityFilter').style.display = view === 'scarcity' ? '' : 'none';
+  $('platformFilter').style.display = view === 'scarcity' ? '' : 'none';
+  $('summary').style.display = portfolio ? 'none' : '';
+
+  $('pageTitle').textContent = VIEW_COPY[view].title;
+  $('pageSub').textContent = VIEW_COPY[view].sub;
+}
+
+// full refresh() rather than just loadSummary(), since these two views are no
+// longer loaded at startup — clicking the tab has to fetch their data itself
+$('viewScarcityBtn').addEventListener('click', () => { switchView('scarcity'); refresh(); pollScanStatus(); });
+$('viewSpikesBtn').addEventListener('click', () => { switchView('spikes'); refresh(); });
+let _facilitySchedulerPollStarted = false;
+$('viewFacilitiesBtn').addEventListener('click', () => {
+  switchView('facilities'); loadFacilities(); pollFacilityScanStatus();
+  if (!_facilitySchedulerPollStarted) { _facilitySchedulerPollStarted = true; pollFacilitySchedulerStatus(); }
+});
+let _eventsSchedulerPollStarted = false;
+$('viewEventsBtn').addEventListener('click', () => {
+  switchView('events'); loadEventsFacilities(); pollEventsScanStatus();
+  if (!_eventsSchedulerPollStarted) { _eventsSchedulerPollStarted = true; pollEventsSchedulerStatus(); }
+});
+let _lystedSchedulerPollStarted = false;
+$('viewLystedBtn').addEventListener('click', () => {
+  switchView('lysted'); loadLysted(); pollLystedScanStatus();
+  if (!_lystedSchedulerPollStarted) { _lystedSchedulerPollStarted = true; pollLystedSchedulerStatus(); }
+});
+
+function fmtEta(seconds) {
+  if (seconds == null) return '';
+  const m = Math.floor(seconds / 60), s = seconds % 60;
+  return m > 0 ? `~${m}m ${s}s remaining` : `~${s}s remaining`;
+}
+
+async function pollScanStatus() {
+  const res = await fetch('/api/scan/status');
+  const status = await res.json();
+  if (status.status === 'running') {
+    $('scanBtn').disabled = true;
+    $('scanBtn').textContent = `Scanning… (${status.checked || 0}/${status.total_listings || '?'})`;
+    $('stopBtn').style.display = '';
+    $('scanEta').style.display = '';
+    $('scanEta').textContent = fmtEta(status.eta_seconds) +
+      (status.limited_or_sold_out ? ` · ${status.limited_or_sold_out} scarce found so far` : '');
+    setTimeout(pollScanStatus, 3000);
+  } else {
+    $('scanBtn').disabled = false;
+    $('scanBtn').textContent = 'Run Scan';
+    $('stopBtn').style.display = 'none';
+    $('scanEta').style.display = 'none';
+    if (status.status === 'completed' || status.status === 'stopped') refresh();
+  }
+}
+
+$('refreshBtn').addEventListener('click', refresh);
+$('scarcityFilter').addEventListener('change', () => { loadRows(); loadSummary(); });
+$('platformFilter').addEventListener('change', refresh);
+$('regionFilter').addEventListener('change', refresh);
+$('scanBtn').addEventListener('click', async () => {
+  const region = $('regionFilter').value;
+  const params = new URLSearchParams();
+  if (region) params.set('region', region);
+  await fetch('/api/scan?' + params.toString(), { method: 'POST' });
+  pollScanStatus();
+});
+$('stopBtn').addEventListener('click', async () => {
+  $('stopBtn').disabled = true;
+  await fetch('/api/scan/stop', { method: 'POST' });
+  $('stopBtn').disabled = false;
+});
+
+// ---------------------------------------------------------------------------
+// Facility Competitors view — radius-clustered SpotHero scan over our static
+// facility portfolio (not event-tied). Grouped by the sheet's own Cluster
+// column for display; the scan itself groups by geocoded radius, so members
+// of one displayed group can still show different numbers if the radius
+// clustering split them differently.
+// ---------------------------------------------------------------------------
+
+let FACILITY_ROWS = [];
+let facilityFilter = 'all';
+const collapsedClusters = new Set();
+
+function facilityRowMatchesFilter(r, filter) {
+  if (filter === 'all') return true;
+  if (filter === 'filled') return r.competitor_total_inv_left !== null && r.competitor_total_inv_left !== undefined;
+  if (filter === 'limited') return !!r.any_limited;
+  if (filter === 'error') return !!r.error;
+  return true;
+}
+
+function facilityRowMatchesSearch(r, q) {
+  if (!q) return true;
+  const hay = (r.facility_name + ' ' + r.facility_id).toLowerCase();
+  return hay.includes(q);
+}
+
+function radiusGroupBadge(r) {
+  if (r.any_sold_out) return `<span class="badge sold_out">Sold out nearby</span>`;
+  if (r.any_limited) return `<span class="badge limited">Limited nearby</span>`;
+  return '';
+}
+
+// Our own facility's live remaining inventory, read from SpotHero by facility
+// id during the scan — the direct answer to the sheet's "Our total inv left",
+// as opposed to the static configured numbers from Notion / the Facility DB.
+function ourSpotheroCell(r) {
+  if (r.our_spots_left == null) return '<span class="muted">—</span>';
+  const cap = r.our_capacity != null ? ` <span class="muted">/ ${r.our_capacity}</span>` : '';
+  const lvl = r.our_scarcity_level;
+  const badge = (lvl === 'sold_out' || lvl === 'limited')
+    ? ` <span class="badge ${lvl}">${lvl.replace('_', ' ')}</span>` : '';
+  return `${r.our_spots_left}${cap}${badge}`;
+}
+
+function ourSpotheroPriceCell(r) {
+  return r.our_spothero_price == null
+    ? '<span class="muted">—</span>'
+    : `<span class="price">${fmtMoney(r.our_spothero_price)}</span>`;
+}
+
+function ourInventoryCell(r) {
+  if (r.our_inventory == null) return '<span class="muted">not synced</span>';
+  const statusHtml = r.our_status ? ` <span class="muted">(${r.our_status})</span>` : '';
+  return `${r.our_inventory}${statusHtml}`;
+}
+
+function fdbStallsCell(r) {
+  if (r.fdb_no_of_stalls == null) return '<span class="muted">not imported</span>';
+  const statusHtml = r.fdb_facility_status ? ` <span class="muted">(${r.fdb_facility_status})</span>` : '';
+  return `${r.fdb_no_of_stalls}${statusHtml}`;
+}
+
+function fdbMonthlyCell(r) {
+  if (r.fdb_monthly_inventory == null) return '<span class="muted">—</span>';
+  return r.fdb_monthly_inventory;
+}
+
+function renderFacilities() {
+  const q = $('facilitySearch').value.trim().toLowerCase();
+  const filtered = FACILITY_ROWS.filter(r => facilityRowMatchesFilter(r, facilityFilter) && facilityRowMatchesSearch(r, q));
+
+  $('facilitiesEmptyState').style.display = FACILITY_ROWS.length ? 'none' : 'block';
+  if (!FACILITY_ROWS.length) { $('facilityClusters').innerHTML = ''; return; }
+
+  // outer grouping: the sheet's own cluster_label (display only)
+  const order = [];
+  const groups = {};
+  for (const r of filtered) {
+    const key = r.cluster_label || '(no cluster)';
+    if (!groups[key]) { groups[key] = []; order.push(key); }
+    groups[key].push(r);
+  }
+
+  if (!order.length) {
+    $('facilityClusters').innerHTML = `<div class="empty">No facilities match this filter.</div>`;
+    return;
+  }
+
+  const chevronSvg = `<svg class="cluster-chevron" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M4 6l4 4 4-4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+
+  $('facilityClusters').innerHTML = order.map(cluster => {
+    const rows = groups[cluster];
+    const isCollapsed = collapsedClusters.has(cluster);
+
+    // inner grouping: the actual radius_group_id — facilities sharing this
+    // id got one shared SpotHero search, so their number is a subtotal
+    // shown once, not repeated per row.
+    const rgOrder = [];
+    const rgGroups = {};
+    for (const r of rows) {
+      const key = r.error ? `err-${r.facility_id}` : (r.radius_group_id || `single-${r.facility_id}`);
+      if (!rgGroups[key]) { rgGroups[key] = []; rgOrder.push(key); }
+      rgGroups[key].push(r);
+    }
+
+    const tablesHtml = rgOrder.map(rgKey => {
+      const rgRows = rgGroups[rgKey];
+      const first = rgRows[0];
+      const isSingle = rgRows.length === 1;
+
+      const rowsHtml = rgRows.map(r => `
+        <tr class="${r.error ? 'row-error' : ''}">
+          <td>${r.facility_name || '—'}</td>
+          <td class="id-cell">${r.facility_id}</td>
+          <td>${ourSpotheroCell(r)}</td>
+          <td>${ourSpotheroPriceCell(r)}</td>
+          <td>${ourInventoryCell(r)}</td>
+          <td>${fdbStallsCell(r)}</td>
+          <td>${fdbMonthlyCell(r)}</td>
+          <td class="muted">${r.checked_at ? fmtDate(r.checked_at) : '—'}</td>
+        </tr>
+      `).join('');
+
+      const canExpand = !first.error && first.competitor_total_inv_left !== null && first.competitor_total_inv_left !== undefined;
+      const banner = first.error
+        ? `<div class="radius-group-banner">
+             <span class="rg-label">Address couldn't be geocoded — not searched</span>
+             <span class="badge sold_out">No address match</span>
+           </div>`
+        : !canExpand
+        ? `<div class="radius-group-banner"><span class="rg-label">No competitor data yet</span></div>`
+        : `<button type="button" class="radius-group-banner rg-clickable" data-action="toggle-lots"
+                   data-facility-id="${first.facility_id}" data-radius="${first.radius_miles}"
+                   data-start-hour="${first.start_hour ?? 10}" data-end-hour="${first.end_hour ?? 22}">
+             <span class="rg-label">${isSingle ? 'This facility’s own search' : `Shared search · ${rgRows.length} nearby facilities`} — view lots & prices ${chevronSvg}</span>
+             <span class="rg-numbers">
+               <span class="rg-total">${first.competitor_total_inv_left}${first.competitor_total_capacity != null ? ` / ${first.competitor_total_capacity}` : ''} spots left</span>
+               ${first.competitor_percent_remaining != null ? `<span class="rg-count">${first.competitor_percent_remaining}% remaining</span>` : ''}
+               <span class="rg-count">${first.competitor_count} competitor lot${first.competitor_count === 1 ? '' : 's'}</span>
+               ${radiusGroupBadge(first)}
+             </span>
+           </button>`;
+
+      const lotsPanelHtml = canExpand
+        ? `<div class="lots-panel" style="display:none;"><div class="lots-panel-inner"></div></div>`
+        : '';
+
+      const parkwhizBanner = canExpand
+        ? `<button type="button" class="radius-group-banner rg-clickable rg-parkwhiz" data-action="toggle-parkwhiz-lots"
+                   data-facility-id="${first.facility_id}" data-radius="${first.radius_miles}"
+                   data-start-hour="${first.start_hour ?? 10}" data-end-hour="${first.end_hour ?? 22}">
+             <span class="rg-label">ParkWhiz — view nearby lots ${chevronSvg}</span>
+             <span class="rg-numbers"><span class="rg-count">status only, no spot counts</span></span>
+           </button>`
+        : '';
+      const parkwhizPanelHtml = canExpand
+        ? `<div class="lots-panel" style="display:none;"><div class="lots-panel-inner"></div></div>`
+        : '';
+
+      return `
+        <div class="tbl-shell${isSingle ? ' radius-group-single' : ''}">
+          ${banner}
+          ${lotsPanelHtml}
+          ${parkwhizBanner}
+          ${parkwhizPanelHtml}
+          <table>
+            <thead>
+              <tr><th>Facility</th><th>Id</th><th title="Live spots remaining on SpotHero, out of capacity — matched by facility id">Our Inv Left (live)</th><th title="Our own current price on SpotHero">Our Price</th><th title="Notion 'Inventory' field, as-is">Inventory (Notion)</th><th title="Facility Database 'NO. OF STALLS'">No. of Stalls</th><th title="Facility Database 'MONTHLY INVENTORY'">Monthly Inv</th><th>Checked</th></tr>
+            </thead>
+            <tbody>${rowsHtml}</tbody>
+          </table>
+        </div>
+      `;
+    }).join('');
+
+    return `
+      <div class="cluster-group${isCollapsed ? ' collapsed' : ''}" data-cluster="${cluster.replace(/"/g, '&quot;')}">
+        <button type="button" class="cluster-group-head" data-action="toggle-cluster">
+          <span class="cluster-group-title">${chevronSvg}<h3>${cluster}</h3></span>
+          <span class="meta">${rows.length} facilit${rows.length === 1 ? 'y' : 'ies'}</span>
+        </button>
+        ${tablesHtml}
+      </div>
+    `;
+  }).join('');
+
+  $('facilityClusters').querySelectorAll('[data-action="toggle-cluster"]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const group = btn.closest('.cluster-group');
+      const cluster = group.dataset.cluster;
+      if (collapsedClusters.has(cluster)) collapsedClusters.delete(cluster);
+      else collapsedClusters.add(cluster);
+      group.classList.toggle('collapsed');
+    });
+  });
+
+  $('facilityClusters').querySelectorAll('[data-action="toggle-lots"]').forEach(btn => {
+    btn.addEventListener('click', () => toggleLotsPanel(btn));
+  });
+
+  $('facilityClusters').querySelectorAll('[data-action="toggle-parkwhiz-lots"]').forEach(btn => {
+    btn.addEventListener('click', () => toggleParkwhizLotsPanel(btn));
+  });
+}
+
+async function toggleLotsPanel(btn) {
+  const panel = btn.nextElementSibling;
+  const isOpen = panel.style.display !== 'none';
+  if (isOpen) { panel.style.display = 'none'; return; }
+
+  panel.style.display = '';
+  const inner = panel.querySelector('.lots-panel-inner');
+  if (panel.dataset.loaded) return;
+  panel.dataset.loaded = '1';
+  inner.innerHTML = `<div class="lot-detail"><div class="loading">Loading competitor lots…</div></div>`;
+
+  const facilityId = btn.dataset.facilityId;
+  const radius = btn.dataset.radius;
+  const startHour = btn.dataset.startHour;
+  const endHour = btn.dataset.endHour;
+  const portfolio = btn.dataset.portfolio || 'pricing';
+  try {
+    const res = await fetch(`/api/facility-competitor-lots?facility_id=${encodeURIComponent(facilityId)}&radius_miles=${encodeURIComponent(radius)}&start_hour=${encodeURIComponent(startHour)}&end_hour=${encodeURIComponent(endHour)}&portfolio=${encodeURIComponent(portfolio)}`);
+    const data = await res.json();
+    if (data.error || !data.competitors.length) {
+      inner.innerHTML = `<div class="lot-detail"><div class="empty-lots">${data.error ? 'Could not load lots: ' + data.error : 'No competitor lots found.'}</div></div>`;
+      return;
+    }
+    const rowsHtml = data.competitors.map(c => `
+      <tr>
+        <td>${c.lot_name || c.lot_address || '—'}</td>
+        <td class="muted">${c.lot_address || '—'}</td>
+        <td class="price">${fmtMoney(c.price)}</td>
+        <td>${c.spots_left != null ? c.spots_left : '<span class="muted">—</span>'}${c.capacity != null ? ` <span class="muted">/ ${c.capacity}</span>` : ''}</td>
+        <td>${c.percent_remaining != null ? c.percent_remaining + '%' : '<span class="muted">—</span>'}</td>
+        <td><span class="badge ${c.scarcity_level}">${(c.scarcity_level || 'unknown').replace('_', ' ')}</span></td>
+      </tr>
+    `).join('');
+    inner.innerHTML = `
+      <div class="lot-detail">
+        <table>
+          <thead><tr><th>Lot</th><th>Address</th><th>Price</th><th>Spots left / total</th><th>% left</th><th>Status</th></tr></thead>
+          <tbody>${rowsHtml}</tbody>
+        </table>
+      </div>
+    `;
+  } catch (e) {
+    inner.innerHTML = `<div class="lot-detail"><div class="empty-lots">Failed to load competitor lots.</div></div>`;
+  }
+}
+
+async function toggleParkwhizLotsPanel(btn) {
+  const panel = btn.nextElementSibling;
+  const isOpen = panel.style.display !== 'none';
+  if (isOpen) { panel.style.display = 'none'; return; }
+
+  panel.style.display = '';
+  const inner = panel.querySelector('.lots-panel-inner');
+  if (panel.dataset.loaded) return;
+  panel.dataset.loaded = '1';
+  inner.innerHTML = `<div class="lot-detail"><div class="loading">Loading ParkWhiz lots…</div></div>`;
+
+  const facilityId = btn.dataset.facilityId;
+  const radius = btn.dataset.radius;
+  const startHour = btn.dataset.startHour;
+  const endHour = btn.dataset.endHour;
+  const portfolio = btn.dataset.portfolio || 'pricing';
+  try {
+    const res = await fetch(`/api/facility-competitor-lots/parkwhiz?facility_id=${encodeURIComponent(facilityId)}&radius_miles=${encodeURIComponent(radius)}&start_hour=${encodeURIComponent(startHour)}&end_hour=${encodeURIComponent(endHour)}&portfolio=${encodeURIComponent(portfolio)}`);
+    const data = await res.json();
+    if (data.error || !data.competitors.length) {
+      inner.innerHTML = `<div class="lot-detail"><div class="empty-lots">${data.error ? 'Could not load lots: ' + data.error : 'No ParkWhiz lots found.'}</div></div>`;
+      return;
+    }
+    const rowsHtml = data.competitors.map(c => `
+      <tr>
+        <td>${c.lot_name || c.lot_address || '—'}</td>
+        <td class="muted">${c.lot_address || '—'}</td>
+        <td class="price">${fmtMoney(c.price)}</td>
+        <td><span class="badge ${parkwhizBadgeClass(c.availability_status)}">${(c.availability_status || 'unknown').replace('_', ' ')}</span></td>
+      </tr>
+    `).join('');
+    inner.innerHTML = `
+      <div class="lot-detail">
+        <table>
+          <thead><tr><th>Lot</th><th>Address</th><th>Price</th><th>Status</th></tr></thead>
+          <tbody>${rowsHtml}</tbody>
+        </table>
+      </div>
+    `;
+  } catch (e) {
+    inner.innerHTML = `<div class="lot-detail"><div class="empty-lots">Failed to load ParkWhiz lots.</div></div>`;
+  }
+}
+
+async function loadFacilities() {
+  const res = await fetch('/api/facility-competitors');
+  FACILITY_ROWS = await res.json();
+  renderFacilities();
+}
+
+function switchFacilitySubview(view) {
+  $('facilityListSubview').style.display = view === 'list' ? '' : 'none';
+  $('facilitySpikesSubview').style.display = view === 'spikes' ? '' : 'none';
+  $('facilityLookupSubview').style.display = view === 'lookup' ? '' : 'none';
+  $('viewFacilityListBtn').classList.toggle('active', view === 'list');
+  $('viewFacilitySpikesBtn').classList.toggle('active', view === 'spikes');
+  $('viewFacilityLookupBtn').classList.toggle('active', view === 'lookup');
+  if (view === 'spikes') loadFacilitySpikes();
+  if (view === 'lookup' && !FACILITY_ROWS.length) loadFacilities();
+}
+$('viewFacilityListBtn').addEventListener('click', () => switchFacilitySubview('list'));
+$('viewFacilitySpikesBtn').addEventListener('click', () => switchFacilitySubview('spikes'));
+$('viewFacilityLookupBtn').addEventListener('click', () => switchFacilitySubview('lookup'));
+
+// ---------------------------------------------------------------------------
+// Lookup sub-tab — search for one facility (or cluster) and see just its
+// competitor picture: summary numbers plus live SpotHero + ParkWhiz lots.
+// ---------------------------------------------------------------------------
+
+function renderLookupMatches() {
+  const q = $('lookupSearch').value.trim().toLowerCase();
+  const box = $('lookupMatches');
+  if (!q) { box.innerHTML = '<div class="empty" style="padding:20px;">Start typing to find a facility or cluster.</div>'; return; }
+
+  const matches = FACILITY_ROWS.filter(r =>
+    (r.facility_name || '').toLowerCase().includes(q) ||
+    (r.facility_id || '').toLowerCase().includes(q) ||
+    (r.cluster_label || '').toLowerCase().includes(q)
+  ).slice(0, 15);
+
+  if (!matches.length) { box.innerHTML = '<div class="empty" style="padding:20px;">No facilities match.</div>'; return; }
+
+  box.innerHTML = matches.map(r => `
+    <button type="button" class="lookup-match" data-facility-id="${r.facility_id}">
+      <span>${r.facility_name || '—'} <span class="muted">· ${r.facility_id}</span></span>
+      <span class="muted">${r.cluster_label || ''}${r.radius_group_size > 1 ? ` · shares search with ${r.radius_group_size - 1} other facilit${r.radius_group_size === 2 ? 'y' : 'ies'}` : ''}</span>
+    </button>
+  `).join('');
+
+  box.querySelectorAll('.lookup-match').forEach(btn => {
+    btn.addEventListener('click', () => showLookupDetail(btn.dataset.facilityId));
+  });
+}
+$('lookupSearch').addEventListener('input', renderLookupMatches);
+
+async function showLookupDetail(facilityId) {
+  const r = FACILITY_ROWS.find(x => x.facility_id === facilityId);
+  if (!r) return;
+  const detail = $('lookupDetail');
+
+  const summaryCards = `
+    <div class="lookup-summary-cards">
+      <div class="stat"><div class="n">${r.our_spots_left ?? '—'}${r.our_capacity != null ? ` / ${r.our_capacity}` : ''}</div><div class="l">Our spots left (live)</div></div>
+      <div class="stat"><div class="n">${r.our_spothero_price != null ? fmtMoney(r.our_spothero_price) : '—'}</div><div class="l">Our price (SpotHero)</div></div>
+      <div class="stat"><div class="n">${r.our_inventory ?? '—'}</div><div class="l">Inventory (Notion)</div></div>
+      <div class="stat"><div class="n">${r.fdb_no_of_stalls ?? '—'}</div><div class="l">No. of Stalls</div></div>
+      <div class="stat"><div class="n">${r.competitor_total_inv_left ?? '—'}${r.competitor_total_capacity != null ? ` / ${r.competitor_total_capacity}` : ''}</div><div class="l">Competitor spots left</div></div>
+      <div class="stat"><div class="n">${r.competitor_count ?? '—'}</div><div class="l">Competitor lots</div></div>
+      <div class="stat"><div class="n">${r.competitor_percent_remaining != null ? r.competitor_percent_remaining + '%' : '—'}</div><div class="l">% remaining nearby</div></div>
+    </div>
+  `;
+
+  detail.innerHTML = `
+    <div class="lookup-section-title">${r.facility_name} · ${r.facility_id}${r.cluster_label ? ' · ' + r.cluster_label : ''}</div>
+    ${r.error ? `<div class="empty" style="padding:16px;">This facility couldn't be searched: ${r.error}</div>` : summaryCards}
+    <div class="lookup-section-title">SpotHero lots nearby</div>
+    <div id="lookupSpotheroLots"><div class="lot-detail"><div class="loading">Loading…</div></div></div>
+    <div class="lookup-section-title">ParkWhiz lots nearby</div>
+    <div id="lookupParkwhizLots"><div class="lot-detail"><div class="loading">Loading…</div></div></div>
+  `;
+
+  if (r.error) {
+    $('lookupSpotheroLots').innerHTML = $('lookupParkwhizLots').innerHTML = '<div class="empty-lots" style="padding:10px;color:var(--muted);font-size:12.5px;">Not searchable — address needs fixing first.</div>';
+    return;
+  }
+
+  const params = `facility_id=${encodeURIComponent(facilityId)}&radius_miles=${encodeURIComponent(r.radius_miles ?? 0.5)}&start_hour=${encodeURIComponent(r.start_hour ?? 10)}&end_hour=${encodeURIComponent(r.end_hour ?? 22)}`;
+
+  fetch(`/api/facility-competitor-lots?${params}`).then(res => res.json()).then(data => {
+    const el = $('lookupSpotheroLots');
+    if (!el) return;
+    if (data.error || !data.competitors.length) {
+      el.innerHTML = `<div class="empty-lots" style="padding:10px;color:var(--muted);font-size:12.5px;">${data.error || 'No SpotHero lots found within radius.'}</div>`;
+      return;
+    }
+    el.innerHTML = `
+      <div class="tbl-shell"><table>
+        <thead><tr><th>Lot</th><th>Address</th><th>Price</th><th>Spots left / total</th><th>% left</th><th>Status</th></tr></thead>
+        <tbody>${data.competitors.map(c => `
+          <tr>
+            <td>${c.lot_name || c.lot_address || '—'}</td>
+            <td class="muted">${c.lot_address || '—'}</td>
+            <td class="price">${fmtMoney(c.price)}</td>
+            <td>${c.spots_left != null ? c.spots_left : '<span class="muted">—</span>'}${c.capacity != null ? ` <span class="muted">/ ${c.capacity}</span>` : ''}</td>
+            <td>${c.percent_remaining != null ? c.percent_remaining + '%' : '<span class="muted">—</span>'}</td>
+            <td><span class="badge ${c.scarcity_level}">${(c.scarcity_level || 'unknown').replace('_', ' ')}</span></td>
+          </tr>`).join('')}</tbody>
+      </table></div>`;
+  }).catch(() => { const el = $('lookupSpotheroLots'); if (el) el.innerHTML = '<div class="empty-lots" style="padding:10px;">Failed to load SpotHero lots.</div>'; });
+
+  fetch(`/api/facility-competitor-lots/parkwhiz?${params}`).then(res => res.json()).then(data => {
+    const el = $('lookupParkwhizLots');
+    if (!el) return;
+    if (data.error || !data.competitors.length) {
+      el.innerHTML = `<div class="empty-lots" style="padding:10px;color:var(--muted);font-size:12.5px;">${data.error || 'No ParkWhiz lots found within radius.'}</div>`;
+      return;
+    }
+    el.innerHTML = `
+      <div class="tbl-shell"><table>
+        <thead><tr><th>Lot</th><th>Address</th><th>Price</th><th>Status</th></tr></thead>
+        <tbody>${data.competitors.map(c => `
+          <tr>
+            <td>${c.lot_name || c.lot_address || '—'}</td>
+            <td class="muted">${c.lot_address || '—'}</td>
+            <td class="price">${fmtMoney(c.price)}</td>
+            <td><span class="badge ${parkwhizBadgeClass(c.availability_status)}">${(c.availability_status || 'unknown').replace('_', ' ')}</span></td>
+          </tr>`).join('')}</tbody>
+      </table></div>`;
+  }).catch(() => { const el = $('lookupParkwhizLots'); if (el) el.innerHTML = '<div class="empty-lots" style="padding:10px;">Failed to load ParkWhiz lots.</div>'; });
+}
+
+// SpotHero only (the platform the team is working from) and only the most
+// recent scan's spikes — the unfiltered endpoint returns all history sorted by
+// size, so the largest jumps ever recorded pin themselves to the top and the
+// view looks stale even while scans run fine.
+const SPIKE_QUERY = 'platform=spothero&latest_run_only=true';
+
+function renderSpikeCaption(el, rows, label) {
+  if (!rows.length) { el.textContent = ''; return; }
+  el.textContent = `${rows.length} ${label}${rows.length === 1 ? '' : 's'} from the latest scan that found any — ${fmtDate(rows[0].detected_at)}`;
+}
+
+async function loadFacilitySpikes() {
+  const res = await fetch('/api/facility-price-spikes?' + SPIKE_QUERY);
+  const rows = await res.json();
+  const tbody = $('facilitySpikeRows');
+  tbody.innerHTML = '';
+  renderSpikeCaption($('facilitySpikesCaption'), rows, 'SpotHero spike');
+  $('facilitySpikesEmptyState').style.display = rows.length ? 'none' : 'block';
+
+  for (const r of rows) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${r.cluster_label || '—'}</td>
+      <td class="muted">${r.sample_facility_name || '—'}</td>
+      <td class="plat">${r.platform}</td>
+      <td>${r.lot_name || r.lot_address || '—'}</td>
+      <td class="price">${fmtMoney(r.previous_price)}</td>
+      <td class="price">${fmtMoney(r.current_price)}</td>
+      <td class="increase">+${r.percent_increase}%</td>
+      <td>${r.notified ? '<span class="badge ok">Sent</span>' : '<span class="muted">—</span>'}</td>
+      <td class="muted">${fmtDate(r.detected_at)}</td>
+    `;
+    tbody.appendChild(tr);
+  }
+}
+
+async function pollFacilitySchedulerStatus() {
+  const res = await fetch('/api/facility-scan/scheduler-status');
+  const status = await res.json();
+  const el = $('facilitySchedulerStatus');
+  if (status.status === 'running') {
+    el.innerHTML = `<span class="spinner"></span> Scheduled scan running (every ${status.interval_hours}h)…`;
+  } else if (status.last_run_summary) {
+    const s = status.last_run_summary;
+    el.innerHTML = `Auto-scan every ${status.interval_hours}h · last run: ${s.facilities_checked} facilities, ${s.spikes_detected} spike(s)${s.spikes_detected ? (s.notified ? ' · Teams notified' : ' · Teams not configured') : ''}.`;
+  } else if (status.last_run_error) {
+    el.innerHTML = `<span class="badge sold_out">Scheduler error</span> ${status.last_run_error}`;
+  } else {
+    el.innerHTML = `<span class="muted">Scheduler starting…</span>`;
+  }
+  setTimeout(pollFacilitySchedulerStatus, 30000);
+}
+
+// scoped to the pricing subview — the Events subview has its own filter
+// buttons sharing the .facility-filter-btn styling but not this state
+$('facilityListSubview').querySelectorAll('.facility-filter-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    $('facilityListSubview').querySelectorAll('.facility-filter-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    facilityFilter = btn.dataset.filter;
+    renderFacilities();
+  });
+});
+$('facilitySearch').addEventListener('input', renderFacilities);
+$('facilityRefreshBtn').addEventListener('click', loadFacilities);
+
+async function pollFacilityScanStatus() {
+  const res = await fetch('/api/facility-scan/status');
+  const status = await res.json();
+  if (status.status === 'running') {
+    $('facilityScanBtn').disabled = true;
+    $('facilityScanBtn').textContent = 'Scanning…';
+    $('facilityScanStatus').style.display = 'flex';
+    const windowLabel = (status.start_hour != null && status.end_hour != null)
+      ? ` · ${fmtHour(status.start_hour)}–${fmtHour(status.end_hour)}` : '';
+    $('facilityScanStatus').innerHTML = `<span class="spinner"></span> Running facility scan (radius ${status.radius_miles ?? ''}mi${windowLabel})…`;
+    setTimeout(pollFacilityScanStatus, 3000);
+  } else {
+    $('facilityScanBtn').disabled = false;
+    $('facilityScanBtn').textContent = 'Run Facility Scan';
+    if (status.status === 'completed') {
+      $('facilityScanStatus').style.display = 'flex';
+      $('facilityScanStatus').innerHTML = `${status.facilities_checked} facilities checked.`;
+      loadFacilities();
+    } else if (status.status === 'failed') {
+      $('facilityScanStatus').style.display = 'flex';
+      $('facilityScanStatus').innerHTML = `<span class="badge sold_out">Failed</span> ${status.error || ''}`;
+    } else {
+      $('facilityScanStatus').style.display = 'none';
+    }
+  }
+}
+
+function fmtHour(h) {
+  const hh = ((h % 24) + 24) % 24;
+  const period = hh < 12 ? 'AM' : 'PM';
+  const display = hh % 12 === 0 ? 12 : hh % 12;
+  return `${display}:00 ${period}`;
+}
+
+function populateHourSelect(el, defaultHour) {
+  el.innerHTML = Array.from({ length: 25 }, (_, h) => h)
+    .map(h => `<option value="${h}"${h === defaultHour ? ' selected' : ''}>${fmtHour(h)}</option>`)
+    .join('');
+}
+populateHourSelect($('facilityStartHour'), 10);
+populateHourSelect($('facilityEndHour'), 22);
+
+$('facilityScanBtn').addEventListener('click', async () => {
+  const radius = $('facilityRadius').value;
+  const startHour = $('facilityStartHour').value;
+  const endHour = $('facilityEndHour').value;
+  const params = new URLSearchParams({ radius_miles: radius, start_hour: startHour, end_hour: endHour });
+  await fetch('/api/facility-scan?' + params.toString(), { method: 'POST' });
+  pollFacilityScanStatus();
+});
+
+async function pollOurInventorySyncStatus() {
+  const res = await fetch('/api/our-inventory/sync/status');
+  const status = await res.json();
+  if (status.status === 'running') {
+    $('ourInventorySyncBtn').disabled = true;
+    $('ourInventorySyncBtn').textContent = 'Syncing…';
+    $('ourInventorySyncStatus').style.display = 'flex';
+    $('ourInventorySyncStatus').innerHTML = `<span class="spinner"></span> Pulling our inventory from Notion…`;
+    setTimeout(pollOurInventorySyncStatus, 3000);
+  } else {
+    $('ourInventorySyncBtn').disabled = false;
+    $('ourInventorySyncBtn').textContent = 'Sync Our Inventory';
+    if (status.status === 'completed') {
+      $('ourInventorySyncStatus').style.display = 'flex';
+      $('ourInventorySyncStatus').innerHTML = `Synced ${status.rows_with_facility_id} facilities from Notion (${status.rows_fetched} rows scanned).`;
+      loadFacilities();
+    } else if (status.status === 'failed') {
+      $('ourInventorySyncStatus').style.display = 'flex';
+      $('ourInventorySyncStatus').innerHTML = `<span class="badge sold_out">Failed</span> ${status.error || ''}`;
+    } else {
+      $('ourInventorySyncStatus').style.display = 'none';
+    }
+  }
+}
+
+$('ourInventorySyncBtn').addEventListener('click', async () => {
+  await fetch('/api/our-inventory/sync', { method: 'POST' });
+  pollOurInventorySyncStatus();
+});
+
+async function pollFdbImportStatus() {
+  const res = await fetch('/api/our-facility-database/import/status');
+  const status = await res.json();
+  if (status.status === 'running') {
+    $('fdbImportBtn').disabled = true;
+    $('fdbImportBtn').textContent = 'Importing…';
+    $('fdbImportStatus').style.display = 'flex';
+    $('fdbImportStatus').innerHTML = `<span class="spinner"></span> Reading FACILITY DATABASE CSV…`;
+    setTimeout(pollFdbImportStatus, 2000);
+  } else {
+    $('fdbImportBtn').disabled = false;
+    $('fdbImportBtn').textContent = 'Import Facility Database';
+    if (status.status === 'completed') {
+      $('fdbImportStatus').style.display = 'flex';
+      $('fdbImportStatus').innerHTML = `Imported ${status.rows_imported} rows from the Facility Database CSV.`;
+      loadFacilities();
+    } else if (status.status === 'failed') {
+      $('fdbImportStatus').style.display = 'flex';
+      $('fdbImportStatus').innerHTML = `<span class="badge sold_out">Failed</span> ${status.error || ''}`;
+    } else {
+      $('fdbImportStatus').style.display = 'none';
+    }
+  }
+}
+
+$('fdbImportBtn').addEventListener('click', async () => {
+  await fetch('/api/our-facility-database/import', { method: 'POST' });
+  pollFdbImportStatus();
+});
+
+// ---------------------------------------------------------------------------
+// Events Competitors view — the Events team's own facility portfolio (Rex's
+// ID/SPOT sheet), scanned by a fully separate backend pipeline (own DB
+// tables, own scheduler, own Teams channel). Mirrors the Facility
+// Competitors view minus the Notion/Facility-Database joins, which only
+// exist for the pricing portfolio.
+// ---------------------------------------------------------------------------
+
+let EVENTS_ROWS = [];
+let eventsFilter = 'all';
+const collapsedEventsClusters = new Set();
+
+function renderEventsFacilities() {
+  const q = $('eventsSearch').value.trim().toLowerCase();
+  const filtered = EVENTS_ROWS.filter(r => facilityRowMatchesFilter(r, eventsFilter) && facilityRowMatchesSearch(r, q));
+
+  $('eventsEmptyState').style.display = EVENTS_ROWS.length ? 'none' : 'block';
+  if (!EVENTS_ROWS.length) { $('eventsClusters').innerHTML = ''; return; }
+
+  const order = [];
+  const groups = {};
+  for (const r of filtered) {
+    const key = r.cluster_label || 'Events portfolio';
+    if (!groups[key]) { groups[key] = []; order.push(key); }
+    groups[key].push(r);
+  }
+
+  if (!order.length) {
+    $('eventsClusters').innerHTML = `<div class="empty">No facilities match this filter.</div>`;
+    return;
+  }
+
+  const chevronSvg = `<svg class="cluster-chevron" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M4 6l4 4 4-4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+
+  $('eventsClusters').innerHTML = order.map(cluster => {
+    const rows = groups[cluster];
+    const isCollapsed = collapsedEventsClusters.has(cluster);
+
+    // same shared-search grouping as the pricing view: facilities with one
+    // radius_group_id got a single SpotHero search, shown once as a banner
+    const rgOrder = [];
+    const rgGroups = {};
+    for (const r of rows) {
+      const key = r.error ? `err-${r.facility_id}` : (r.radius_group_id || `single-${r.facility_id}`);
+      if (!rgGroups[key]) { rgGroups[key] = []; rgOrder.push(key); }
+      rgGroups[key].push(r);
+    }
+
+    const tablesHtml = rgOrder.map(rgKey => {
+      const rgRows = rgGroups[rgKey];
+      const first = rgRows[0];
+      const isSingle = rgRows.length === 1;
+
+      const rowsHtml = rgRows.map(r => `
+        <tr class="${r.error ? 'row-error' : ''}">
+          <td>${r.facility_name || '—'}</td>
+          <td class="id-cell">${r.facility_id}</td>
+          <td>${ourSpotheroCell(r)}</td>
+          <td>${ourSpotheroPriceCell(r)}</td>
+          <td class="muted">${r.facility_address || '—'}</td>
+          <td class="muted">${r.checked_at ? fmtDate(r.checked_at) : '—'}</td>
+        </tr>
+      `).join('');
+
+      const canExpand = !first.error && first.competitor_total_inv_left !== null && first.competitor_total_inv_left !== undefined;
+      const banner = first.error
+        ? `<div class="radius-group-banner">
+             <span class="rg-label">Address couldn't be geocoded — not searched</span>
+             <span class="badge sold_out">No address match</span>
+           </div>`
+        : !canExpand
+        ? `<div class="radius-group-banner"><span class="rg-label">No competitor data yet</span></div>`
+        : `<button type="button" class="radius-group-banner rg-clickable" data-action="toggle-lots" data-portfolio="events"
+                   data-facility-id="${first.facility_id}" data-radius="${first.radius_miles}"
+                   data-start-hour="${first.start_hour ?? 10}" data-end-hour="${first.end_hour ?? 22}">
+             <span class="rg-label">${isSingle ? 'This facility’s own search' : `Shared search · ${rgRows.length} nearby facilities`} — view lots & prices ${chevronSvg}</span>
+             <span class="rg-numbers">
+               <span class="rg-total">${first.competitor_total_inv_left}${first.competitor_total_capacity != null ? ` / ${first.competitor_total_capacity}` : ''} spots left</span>
+               ${first.competitor_percent_remaining != null ? `<span class="rg-count">${first.competitor_percent_remaining}% remaining</span>` : ''}
+               <span class="rg-count">${first.competitor_count} competitor lot${first.competitor_count === 1 ? '' : 's'}</span>
+               ${radiusGroupBadge(first)}
+             </span>
+           </button>`;
+
+      const lotsPanelHtml = canExpand
+        ? `<div class="lots-panel" style="display:none;"><div class="lots-panel-inner"></div></div>`
+        : '';
+
+      const parkwhizBanner = canExpand
+        ? `<button type="button" class="radius-group-banner rg-clickable rg-parkwhiz" data-action="toggle-parkwhiz-lots" data-portfolio="events"
+                   data-facility-id="${first.facility_id}" data-radius="${first.radius_miles}"
+                   data-start-hour="${first.start_hour ?? 10}" data-end-hour="${first.end_hour ?? 22}">
+             <span class="rg-label">ParkWhiz — view nearby lots ${chevronSvg}</span>
+             <span class="rg-numbers"><span class="rg-count">status only, no spot counts</span></span>
+           </button>`
+        : '';
+      const parkwhizPanelHtml = canExpand
+        ? `<div class="lots-panel" style="display:none;"><div class="lots-panel-inner"></div></div>`
+        : '';
+
+      return `
+        <div class="tbl-shell${isSingle ? ' radius-group-single' : ''}">
+          ${banner}
+          ${lotsPanelHtml}
+          ${parkwhizBanner}
+          ${parkwhizPanelHtml}
+          <table>
+            <thead>
+              <tr><th>Facility</th><th>Id</th><th title="Live spots remaining on SpotHero, out of capacity — matched by facility id">Our Inv Left (live)</th><th title="Our own current price on SpotHero">Our Price</th><th>Address searched</th><th>Checked</th></tr>
+            </thead>
+            <tbody>${rowsHtml}</tbody>
+          </table>
+        </div>
+      `;
+    }).join('');
+
+    return `
+      <div class="cluster-group${isCollapsed ? ' collapsed' : ''}" data-cluster="${cluster.replace(/"/g, '&quot;')}">
+        <button type="button" class="cluster-group-head" data-action="toggle-cluster">
+          <span class="cluster-group-title">${chevronSvg}<h3>${cluster}</h3></span>
+          <span class="meta">${rows.length} facilit${rows.length === 1 ? 'y' : 'ies'}</span>
+        </button>
+        ${tablesHtml}
+      </div>
+    `;
+  }).join('');
+
+  $('eventsClusters').querySelectorAll('[data-action="toggle-cluster"]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const group = btn.closest('.cluster-group');
+      const cluster = group.dataset.cluster;
+      if (collapsedEventsClusters.has(cluster)) collapsedEventsClusters.delete(cluster);
+      else collapsedEventsClusters.add(cluster);
+      group.classList.toggle('collapsed');
+    });
+  });
+
+  $('eventsClusters').querySelectorAll('[data-action="toggle-lots"]').forEach(btn => {
+    btn.addEventListener('click', () => toggleLotsPanel(btn));
+  });
+
+  $('eventsClusters').querySelectorAll('[data-action="toggle-parkwhiz-lots"]').forEach(btn => {
+    btn.addEventListener('click', () => toggleParkwhizLotsPanel(btn));
+  });
+}
+
+async function loadEventsFacilities() {
+  const res = await fetch('/api/events-competitors');
+  EVENTS_ROWS = await res.json();
+  renderEventsFacilities();
+}
+
+async function loadEventsSpikes() {
+  const res = await fetch('/api/events-price-spikes?' + SPIKE_QUERY);
+  const rows = await res.json();
+  const tbody = $('eventsSpikeRows');
+  tbody.innerHTML = '';
+  renderSpikeCaption($('eventsSpikesCaption'), rows, 'SpotHero spike');
+  $('eventsSpikesEmptyState').style.display = rows.length ? 'none' : 'block';
+
+  for (const r of rows) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${r.sample_facility_name || '—'}</td>
+      <td class="plat">${r.platform}</td>
+      <td>${r.lot_name || r.lot_address || '—'}</td>
+      <td class="price">${fmtMoney(r.previous_price)}</td>
+      <td class="price">${fmtMoney(r.current_price)}</td>
+      <td class="increase">+${r.percent_increase}%</td>
+      <td>${r.notified ? '<span class="badge ok">Sent</span>' : '<span class="muted">—</span>'}</td>
+      <td class="muted">${fmtDate(r.detected_at)}</td>
+    `;
+    tbody.appendChild(tr);
+  }
+}
+
+async function loadEventsLowInv() {
+  // no platform filter needed — only SpotHero reports spot counts, so
+  // low-inventory crossings can only ever come from it
+  const res = await fetch('/api/events-low-inventory-alerts?latest_run_only=true');
+  const rows = await res.json();
+  const tbody = $('eventsLowInvRows');
+  tbody.innerHTML = '';
+  renderSpikeCaption($('eventsLowInvCaption'), rows, 'low-inventory alert');
+  $('eventsLowInvEmptyState').style.display = rows.length ? 'none' : 'block';
+
+  for (const r of rows) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${r.sample_facility_name || '—'}</td>
+      <td class="plat">${r.platform}</td>
+      <td>${r.lot_name || r.lot_address || '—'}</td>
+      <td>${r.spots_left ?? '—'}</td>
+      <td>${r.capacity ?? '—'}</td>
+      <td><span class="badge limited">${r.percent_remaining != null ? r.percent_remaining + '%' : '—'}</span></td>
+      <td class="muted">${r.previous_percent_remaining != null ? r.previous_percent_remaining + '%' : '—'}</td>
+      <td>${r.notified ? '<span class="badge ok">Sent</span>' : '<span class="muted">—</span>'}</td>
+      <td class="muted">${fmtDate(r.detected_at)}</td>
+    `;
+    tbody.appendChild(tr);
+  }
+}
+
+function switchEventsSubview(view) {
+  $('eventsListSubview').style.display = view === 'list' ? '' : 'none';
+  $('eventsSpikesSubview').style.display = view === 'spikes' ? '' : 'none';
+  $('eventsLowInvSubview').style.display = view === 'lowinv' ? '' : 'none';
+  $('viewEventsListBtn').classList.toggle('active', view === 'list');
+  $('viewEventsSpikesBtn').classList.toggle('active', view === 'spikes');
+  $('viewEventsLowInvBtn').classList.toggle('active', view === 'lowinv');
+  if (view === 'spikes') loadEventsSpikes();
+  if (view === 'lowinv') loadEventsLowInv();
+}
+$('viewEventsListBtn').addEventListener('click', () => switchEventsSubview('list'));
+$('viewEventsSpikesBtn').addEventListener('click', () => switchEventsSubview('spikes'));
+$('viewEventsLowInvBtn').addEventListener('click', () => switchEventsSubview('lowinv'));
+
+$('eventsListSubview').querySelectorAll('.events-filter-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    $('eventsListSubview').querySelectorAll('.events-filter-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    eventsFilter = btn.dataset.filter;
+    renderEventsFacilities();
+  });
+});
+$('eventsSearch').addEventListener('input', renderEventsFacilities);
+$('eventsRefreshBtn').addEventListener('click', loadEventsFacilities);
+
+async function pollEventsScanStatus() {
+  const res = await fetch('/api/events-scan/status');
+  const status = await res.json();
+  if (status.status === 'running') {
+    $('eventsScanBtn').disabled = true;
+    $('eventsScanBtn').textContent = 'Scanning…';
+    $('eventsScanStatus').style.display = 'flex';
+    const windowLabel = (status.start_hour != null && status.end_hour != null)
+      ? ` · ${fmtHour(status.start_hour)}–${fmtHour(status.end_hour)}` : '';
+    $('eventsScanStatus').innerHTML = `<span class="spinner"></span> Running Events scan (radius ${status.radius_miles ?? ''}mi${windowLabel})…`;
+    setTimeout(pollEventsScanStatus, 3000);
+  } else {
+    $('eventsScanBtn').disabled = false;
+    $('eventsScanBtn').textContent = 'Run Events Scan';
+    if (status.status === 'completed') {
+      $('eventsScanStatus').style.display = 'flex';
+      $('eventsScanStatus').innerHTML = `${status.facilities_checked} Events facilities checked · ${status.spikes_detected} spike(s)${status.notified ? ' · Teams notified' : ''}.`;
+      loadEventsFacilities();
+    } else if (status.status === 'failed') {
+      $('eventsScanStatus').style.display = 'flex';
+      $('eventsScanStatus').innerHTML = `<span class="badge sold_out">Failed</span> ${status.error || ''}`;
+    } else {
+      $('eventsScanStatus').style.display = 'none';
+    }
+  }
+}
+
+async function pollEventsSchedulerStatus() {
+  const res = await fetch('/api/events-scan/scheduler-status');
+  const status = await res.json();
+  const el = $('eventsSchedulerStatus');
+  if (status.status === 'running') {
+    el.innerHTML = `<span class="spinner"></span> Scheduled Events scan running (every ${status.interval_hours}h)…`;
+  } else if (status.last_run_summary) {
+    const s = status.last_run_summary;
+    el.innerHTML = `Auto-scan every ${status.interval_hours}h · last run: ${s.facilities_checked} facilities, ${s.spikes_detected} spike(s), ${s.low_inventory_alerts_detected} low-inventory alert(s)${(s.spikes_detected || s.low_inventory_alerts_detected) ? (s.notified ? ' · Teams notified' : ' · Teams not configured') : ''}.`;
+  } else if (status.last_run_error) {
+    el.innerHTML = `<span class="badge sold_out">Scheduler error</span> ${status.last_run_error}`;
+  } else {
+    el.innerHTML = `<span class="muted">Scheduler starting…</span>`;
+  }
+  setTimeout(pollEventsSchedulerStatus, 30000);
+}
+
+populateHourSelect($('eventsStartHour'), 10);
+populateHourSelect($('eventsEndHour'), 22);
+
+$('eventsScanBtn').addEventListener('click', async () => {
+  const radius = $('eventsRadius').value;
+  const startHour = $('eventsStartHour').value;
+  const endHour = $('eventsEndHour').value;
+  const params = new URLSearchParams({ radius_miles: radius, start_hour: startHour, end_hour: endHour });
+  await fetch('/api/events-scan?' + params.toString(), { method: 'POST' });
+  pollEventsScanStatus();
+});
+
+// ---------------------------------------------------------------------------
+// Lysted Listings view — the listing team's CSV export (our live listings on
+// Lysted) checked against the buying platforms. A different question from the
+// competitor tabs: not "should we raise our price" but "has the parking behind
+// our listing sold out at source, so the listing has to come down". Crossings
+// are alerted to the listing team's own Teams channel.
+// ---------------------------------------------------------------------------
+
+let LYSTED_ROWS = [];
+let lystedFilter = 'all';
+const LYSTED_RANK = { sold_out: 0, limited: 1, unknown: 2, not_found: 3, ok: 4, unchecked: 5 };
+
+// Worst reading across the two platforms — sold out anywhere is what matters.
+function lystedRowLevel(r) {
+  const levels = [r.spothero && r.spothero.scarcity_level, r.parkwhiz && r.parkwhiz.scarcity_level].filter(Boolean);
+  if (!levels.length) return 'unchecked';
+  for (const lvl of ['sold_out', 'limited', 'ok', 'not_found']) if (levels.includes(lvl)) return lvl;
+  return 'unknown';
+}
+
+function lystedPlatformCell(p) {
+  if (!p || !p.scarcity_level) return '<span class="muted">not checked</span>';
+  const lvl = p.scarcity_level;
+  let detail = '';
+  if (p.spots_left != null) detail = ` <span class="muted">${p.spots_left}${p.capacity != null ? ' / ' + p.capacity : ''} left</span>`;
+  else if (p.availability_status) detail = ` <span class="muted">${p.availability_status.replace('_', ' ')}</span>`;
+  else if (lvl === 'not_found' || lvl === 'unknown') detail = p.error ? ` <span class="muted" title="${p.error.replace(/"/g, '&quot;')}">${p.error.length > 34 ? p.error.slice(0, 34) + '…' : p.error}</span>` : '';
+  const price = p.price != null ? ` <span class="muted">${fmtMoney(p.price)}</span>` : '';
+  return `<span class="badge ${lvl}">${lvl.replace('_', ' ')}</span>${detail}${price}`;
+}
+
+function renderLystedCaption(upload, rows) {
+  const el = $('lystedCaption');
+  if (!upload) { el.textContent = ''; return; }
+  const stamps = rows.map(r => r.last_checked_at).filter(Boolean).sort();
+  const last = stamps.length ? stamps[stamps.length - 1] : null;
+  el.textContent = `${rows.length} live listing${rows.length === 1 ? '' : 's'} from ${upload.filename} (uploaded ${fmtDate(upload.uploaded_at)}, ${upload.skipped_count} not live and skipped)` +
+    (last ? ` · last checked ${fmtDate(last)}` : ' · not checked yet — click "Check Now"');
+}
+
+function renderLysted() {
+  const q = $('lystedSearch').value.trim().toLowerCase();
+  const rows = LYSTED_ROWS
+    .map(r => ({ ...r, _level: lystedRowLevel(r) }))
+    .filter(r => lystedFilter === 'all' || r._level === lystedFilter)
+    .filter(r => !q || `${r.event_name_raw} ${r.venue} ${r.city} ${r.state} ${r.section}`.toLowerCase().includes(q))
+    .sort((a, b) => (LYSTED_RANK[a._level] - LYSTED_RANK[b._level]) || (a.event_date || '').localeCompare(b.event_date || ''));
+
+  const tbody = $('lystedRows');
+  tbody.innerHTML = '';
+  $('lystedEmptyState').style.display = LYSTED_ROWS.length ? 'none' : 'block';
+  if (LYSTED_ROWS.length && !rows.length) {
+    tbody.innerHTML = `<tr><td colspan="9" class="empty" style="padding:30px;">No listings match this filter.</td></tr>`;
+    return;
+  }
+  for (const r of rows) {
+    const tr = document.createElement('tr');
+    if (r._level === 'sold_out') tr.className = 'spike-row';
+    tr.innerHTML = `
+      <td>${r.event_name_raw || r.event_name || '—'}</td>
+      <td class="muted">${r.event_date ? fmtDate(r.event_date) : (r.event_date_raw || '—')}</td>
+      <td class="muted">${r.venue || '—'}${r.city ? `<br>${r.city}${r.state ? ', ' + r.state : ''}` : ''}</td>
+      <td>${r.section || '—'}</td>
+      <td class="price">${r.quantity ?? '—'}</td>
+      <td class="price">${fmtMoney(r.list_price)}</td>
+      <td>${lystedPlatformCell(r.spothero)}</td>
+      <td>${lystedPlatformCell(r.parkwhiz)}</td>
+      <td class="muted">${r.last_checked_at ? fmtDate(r.last_checked_at) : '—'}</td>
+    `;
+    tbody.appendChild(tr);
+  }
+}
+
+async function loadLysted() {
+  const res = await fetch('/api/lysted/listings');
+  const data = await res.json();
+  LYSTED_ROWS = data.listings || [];
+  renderLystedCaption(data.upload, LYSTED_ROWS);
+  renderLysted();
+}
+
+async function loadLystedAlerts() {
+  const res = await fetch('/api/lysted/sold-out-alerts?latest_run_only=true');
+  const rows = await res.json();
+  renderSpikeCaption($('lystedAlertsCaption'), rows, 'sold-out alert');
+  const tbody = $('lystedAlertRows');
+  tbody.innerHTML = '';
+  $('lystedAlertsEmptyState').style.display = rows.length ? 'none' : 'block';
+  for (const r of rows) {
+    const tr = document.createElement('tr');
+    tr.className = 'spike-row';
+    tr.innerHTML = `
+      <td>${r.event_name || '—'}</td>
+      <td class="muted">${r.event_date ? fmtDate(r.event_date) : '—'}</td>
+      <td class="muted">${r.venue || '—'}${r.state ? `<br>${r.state}` : ''}</td>
+      <td>${r.section || '—'}</td>
+      <td class="plat">${r.platforms || '—'}</td>
+      <td class="price">${r.quantity ?? '—'}</td>
+      <td class="price">${fmtMoney(r.list_price)}</td>
+      <td class="muted">${r.previous_levels || 'first check'}</td>
+      <td>${r.notified ? '<span class="badge ok">Sent</span>' : '<span class="muted">—</span>'}</td>
+      <td class="muted">${fmtDate(r.detected_at)}</td>
+    `;
+    tbody.appendChild(tr);
+  }
+}
+
+function switchLystedSubview(view) {
+  $('lystedListSubview').style.display = view === 'list' ? '' : 'none';
+  $('lystedAlertsSubview').style.display = view === 'alerts' ? '' : 'none';
+  $('viewLystedListBtn').classList.toggle('active', view === 'list');
+  $('viewLystedAlertsBtn').classList.toggle('active', view === 'alerts');
+  if (view === 'alerts') loadLystedAlerts();
+}
+$('viewLystedListBtn').addEventListener('click', () => switchLystedSubview('list'));
+$('viewLystedAlertsBtn').addEventListener('click', () => switchLystedSubview('alerts'));
+
+$('lystedListSubview').querySelectorAll('.lysted-filter-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    $('lystedListSubview').querySelectorAll('.lysted-filter-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    lystedFilter = btn.dataset.filter;
+    renderLysted();
+  });
+});
+$('lystedSearch').addEventListener('input', renderLysted);
+$('lystedRefreshBtn').addEventListener('click', loadLysted);
+
+$('lystedUploadBtn').addEventListener('click', async () => {
+  const input = $('lystedFile');
+  const status = $('lystedUploadStatus');
+  status.style.display = 'flex';
+  if (!input.files || !input.files.length) {
+    status.innerHTML = `<span class="badge limited">Choose a file</span> Pick the CSV exported from Lysted, then click Upload Export.`;
+    return;
+  }
+  const btn = $('lystedUploadBtn');
+  btn.disabled = true; btn.textContent = 'Uploading…';
+  status.innerHTML = `<span class="spinner"></span> Uploading ${input.files[0].name}…`;
+  try {
+    const fd = new FormData();
+    fd.append('file', input.files[0]);
+    const res = await fetch('/api/lysted/upload', { method: 'POST', body: fd });
+    const data = await res.json();
+    if (!res.ok) {
+      status.innerHTML = `<span class="badge sold_out">Not accepted</span> ${data.detail || 'upload failed'}`;
+    } else {
+      const warn = (data.warnings || []).length ? ` · ${data.warnings.length} warning(s): ${data.warnings[0]}${data.warnings.length > 1 ? ' …' : ''}` : '';
+      status.innerHTML = `Uploaded ${data.filename}: <strong>${data.active_count}</strong> live listing(s) of ${data.row_count} rows (${data.skipped_count} not live, skipped)${warn}. Click "Check Now" to check them against the buying platforms.`;
+      input.value = '';
+      loadLysted();
+    }
+  } catch (e) {
+    status.innerHTML = `<span class="badge sold_out">Failed</span> ${e}`;
+  } finally {
+    btn.disabled = false; btn.textContent = 'Upload Export';
+  }
+});
+
+async function pollLystedScanStatus() {
+  const res = await fetch('/api/lysted/scan/status');
+  const status = await res.json();
+  const el = $('lystedScanStatus');
+  if (status.status === 'running') {
+    $('lystedScanBtn').disabled = true;
+    $('lystedScanBtn').textContent = status.total_listings ? `Checking… (${status.checked || 0}/${status.total_listings})` : 'Checking…';
+    el.style.display = 'flex';
+    el.innerHTML = `<span class="spinner"></span> Checking listings against SpotHero and ParkWhiz…${status.eta_seconds != null ? ' ' + fmtEta(status.eta_seconds) : ''}`;
+    setTimeout(pollLystedScanStatus, 3000);
+  } else {
+    $('lystedScanBtn').disabled = false;
+    $('lystedScanBtn').textContent = 'Check Now';
+    if (status.status === 'completed' || status.status === 'stopped') {
+      el.style.display = 'flex';
+      const alerts = status.sold_out_alerts_detected || 0;
+      el.innerHTML = `${status.checked} listing(s) checked · ${status.limited_or_sold_out || 0} limited or sold out · ` +
+        (alerts ? `<strong>${alerts} newly sold out at source</strong>${status.notified ? ' · Teams notified' : ' · Teams not configured'}` : 'nothing newly sold out') + '.';
+      loadLysted();
+    } else if (status.status === 'skipped') {
+      el.style.display = 'flex';
+      el.innerHTML = `<span class="badge limited">Nothing to check</span> upload a Lysted export first.`;
+    } else if (status.status === 'failed') {
+      el.style.display = 'flex';
+      el.innerHTML = `<span class="badge sold_out">Failed</span> ${status.error || ''}`;
+    } else {
+      el.style.display = 'none';
+    }
+  }
+}
+
+async function pollLystedSchedulerStatus() {
+  const res = await fetch('/api/lysted/scheduler-status');
+  const status = await res.json();
+  const el = $('lystedSchedulerStatus');
+  if (status.status === 'running') {
+    el.innerHTML = `<span class="spinner"></span> Scheduled check running (every ${status.interval_hours}h)…`;
+  } else if (status.last_run_summary) {
+    const s = status.last_run_summary;
+    el.innerHTML = s.status === 'skipped'
+      ? `Auto-check every ${status.interval_hours}h · waiting for a Lysted export to be uploaded.`
+      : `Auto-check every ${status.interval_hours}h · last run: ${s.checked} listing(s), ${s.sold_out_alerts_detected || 0} newly sold out${(s.sold_out_alerts_detected || 0) ? (s.notified ? ' · Teams notified' : ' · Teams not configured') : ''}.`;
+  } else if (status.last_run_error) {
+    el.innerHTML = `<span class="badge sold_out">Scheduler error</span> ${status.last_run_error}`;
+  } else {
+    el.innerHTML = `<span class="muted">Scheduler starting…</span>`;
+  }
+  setTimeout(pollLystedSchedulerStatus, 30000);
+}
+
+$('lystedScanBtn').addEventListener('click', async () => {
+  const res = await fetch('/api/lysted/scan', { method: 'POST' });
+  const data = await res.json();
+  if (data.status === 'no_upload') {
+    $('lystedScanStatus').style.display = 'flex';
+    $('lystedScanStatus').innerHTML = `<span class="badge limited">Nothing to check</span> upload a Lysted export first.`;
+    return;
+  }
+  pollLystedScanStatus();
+});
+
+// Land on Facility Competitors — the Scarcity/Price Spikes views are hidden,
+// so their dashboard endpoints aren't fetched on load either.
+switchView('facilities');
+loadFacilities();
+pollFacilityScanStatus();
+_facilitySchedulerPollStarted = true;
+pollFacilitySchedulerStatus();
+</script>
+</body>
+</html>
