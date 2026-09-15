@@ -246,6 +246,8 @@ def load_active_listings(db=None) -> List[Dict[str, Any]]:
                 "section": r.section or "",
                 "our_price": r.list_price,
                 "region": r.state,
+                "city": r.city,
+                "state": r.state,
                 "quantity": r.quantity,
                 "source": SOURCE,
             }

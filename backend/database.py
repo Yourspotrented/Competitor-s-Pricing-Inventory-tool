@@ -71,6 +71,10 @@ class LotCheck(Base):
     event_date = Column(String(100), nullable=True)
 
     platform = Column(String(30), nullable=False, index=True)   # "spothero" | "parkwhiz"
+    # The platform's own id for the lot, where it exposes one (SpotHero does,
+    # ParkWhiz does not). Name+address alone are not unique — see the comment
+    # in list_spothero_lots — so price history needs this to pair rows up.
+    lot_id = Column(String(50), nullable=True, index=True)
     lot_name = Column(String(500), nullable=True)
     lot_address = Column(String(500), nullable=True)
     price = Column(Float, nullable=True)
@@ -538,6 +542,7 @@ def _ensure_column(table: str, column: str, ddl: str) -> None:
 def create_tables() -> None:
     Base.metadata.create_all(bind=_ENGINE)
     _ensure_column("scarcity_checks", "source", "VARCHAR(20)")
+    _ensure_column("lot_checks", "lot_id", "VARCHAR(50)")
 
 
 def get_db():

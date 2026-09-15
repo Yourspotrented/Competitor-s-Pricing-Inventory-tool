@@ -36,12 +36,17 @@ def _webhook_url(webhook_env_var: str = "TEAMS_WEBHOOK_URL") -> str:
     return os.getenv(webhook_env_var, "").strip()
 
 
+def _near_line(item: Dict[str, Any]) -> str:
+    """The facility-flow context line: "Near <facility> (<cluster>)"."""
+    facility = item.get("sample_facility_name") or "(unknown facility)"
+    cluster = item.get("cluster_label") or ""
+    return f"Near {facility}" + (f" ({cluster})" if cluster else "")
+
+
 def _spike_to_teams_fact_set(spike: Dict[str, Any]) -> dict:
     """One MessageCard section for a single price spike."""
-    facility = spike.get("sample_facility_name") or "(unknown facility)"
-    cluster = spike.get("cluster_label") or ""
     title = f"💲 {spike['lot_name'] or spike['lot_address'] or 'Unknown lot'} — +{spike['percent_increase']}%"
-    subtitle = f"Near {facility}" + (f" ({cluster})" if cluster else "")
+    subtitle = spike.get("context_subtitle") or _near_line(spike)
     return {
         "activityTitle": title,
         "activitySubtitle": subtitle,
@@ -56,10 +61,8 @@ def _spike_to_teams_fact_set(spike: Dict[str, Any]) -> dict:
 
 def _low_inventory_to_teams_fact_set(alert: Dict[str, Any]) -> dict:
     """One MessageCard section for a single low-inventory crossing."""
-    facility = alert.get("sample_facility_name") or "(unknown facility)"
-    cluster = alert.get("cluster_label") or ""
     title = f"📉 {alert['lot_name'] or alert['lot_address'] or 'Unknown lot'} — {alert['percent_remaining']:.1f}% left"
-    subtitle = f"Near {facility}" + (f" ({cluster})" if cluster else "")
+    subtitle = alert.get("context_subtitle") or _near_line(alert)
     spots = alert.get("spots_left")
     capacity = alert.get("capacity")
     spots_value = f"{spots} / {capacity}" if spots is not None and capacity is not None else "—"
@@ -75,7 +78,8 @@ def _low_inventory_to_teams_fact_set(alert: Dict[str, Any]) -> dict:
 
 
 def notify_price_spikes(spikes: List[Dict[str, Any]], low_inventory_alerts: List[Dict[str, Any]] = None,
-                         attachment_url: str = "", webhook_env_var: str = "TEAMS_WEBHOOK_URL") -> bool:
+                         attachment_url: str = "", webhook_env_var: str = "TEAMS_WEBHOOK_URL",
+                         subject: str = "our facilities") -> bool:
     """
     Post one bundled Teams message covering newly-detected facility
     competitor price spikes and low-inventory crossings from the same scan.
@@ -125,9 +129,9 @@ def notify_price_spikes(spikes: List[Dict[str, Any]], low_inventory_alerts: List
 
     text_lines = []
     if spikes:
-        text_lines.append("Competitor pricing jumped 20%+ near one or more of our facilities.")
+        text_lines.append(f"Competitor pricing jumped 20%+ near one or more of {subject}.")
     if low_inventory_alerts:
-        text_lines.append("Competitor inventory dropped below 20% remaining near one or more of our facilities.")
+        text_lines.append(f"Competitor inventory dropped below 20% remaining near one or more of {subject}.")
     text = " ".join(text_lines)
     if attachment_url:
         text += f"\n\n[📄 Open the updated Clusters.xlsx]({attachment_url})"

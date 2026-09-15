@@ -1861,7 +1861,12 @@ $('eventsScanBtn').addEventListener('click', async () => {
 
 let LYSTED_ROWS = [];
 let lystedFilter = 'all';
-const LYSTED_RANK = { sold_out: 0, limited: 1, unknown: 2, not_found: 3, ok: 4, unchecked: 5 };
+// Ordered by what the listing team can act on. Rows we actually got a
+// reading for come first — sold out is the one needing action, then
+// limited, then healthy. Rows where neither platform could tell us
+// anything (not listed there, or the check failed) sink to the bottom:
+// they are not findings, and they used to push real readings off screen.
+const LYSTED_RANK = { sold_out: 0, limited: 1, ok: 2, unknown: 3, not_found: 4, unchecked: 5 };
 
 // Worst reading across the two platforms — sold out anywhere is what matters.
 function lystedRowLevel(r) {

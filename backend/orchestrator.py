@@ -145,6 +145,8 @@ def run_scan(
                     event_date=listing.get("event_date", ""),
                     event_venue=listing.get("event_venue", ""),
                     our_section=listing.get("section", ""),
+                    city=listing.get("city") or "",
+                    state=listing.get("state") or listing.get("region") or "",
                 )
             except Exception as exc:
                 logger.error("Scarcity check crashed on listing %s: %s",
@@ -200,6 +202,8 @@ def run_scan(
                         event_date=listing.get("event_date", ""),
                         event_venue=listing.get("event_venue", ""),
                         our_section=listing.get("section", ""),
+                        city=listing.get("city") or "",
+                        state=listing.get("state") or listing.get("region") or "",
                     )
                 except Exception as exc:
                     logger.warning("list_event_lots crashed for event %s: %s", reachpro_event_id, exc)
@@ -210,17 +214,26 @@ def run_scan(
                     if lot.get("price") is None:
                         continue
 
-                    prev = (
-                        db.query(LotCheck)
-                        .filter(
-                            LotCheck.reachpro_event_id == reachpro_event_id,
-                            LotCheck.platform == lot["platform"],
+                    # Prefer the platform's own lot id: two different lots can
+                    # share a name AND an address, and matching on those alone
+                    # paired the wrong rows — one Atlanta address lists lots at
+                    # $19.35 and $32.55, so every scan "detected" the same
+                    # +68.2% spike forever. Fall back to name+address for
+                    # ParkWhiz, which exposes no id.
+                    lot_id = (lot.get("lot_id") or "").strip()
+                    prev_q = db.query(LotCheck).filter(
+                        LotCheck.reachpro_event_id == reachpro_event_id,
+                        LotCheck.platform == lot["platform"],
+                    )
+                    if lot_id:
+                        prev_q = prev_q.filter(LotCheck.lot_id == lot_id)
+                    else:
+                        prev_q = prev_q.filter(
+                            LotCheck.lot_id.is_(None),
                             LotCheck.lot_name == lot.get("lot_name"),
                             LotCheck.lot_address == lot.get("lot_address"),
                         )
-                        .order_by(LotCheck.checked_at.desc())
-                        .first()
-                    )
+                    prev = prev_q.order_by(LotCheck.checked_at.desc()).first()
 
                     if prev is not None and prev.price and prev.price > 0:
                         pct_change = (lot["price"] - prev.price) / prev.price * 100
@@ -242,6 +255,7 @@ def run_scan(
                             ))
 
                     db.add(LotCheck(
+                        lot_id=lot_id or None,
                         reachpro_event_id=reachpro_event_id,
                         event_name=listing.get("event_name"),
                         event_date=listing.get("event_date"),

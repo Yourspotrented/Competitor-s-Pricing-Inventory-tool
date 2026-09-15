@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import logging
+import math
 import re
 import threading
 import time
@@ -118,6 +119,15 @@ def _normalize(text: str) -> str:
 
 def _normalize_addr(text: str) -> str:
     t = text.lower()
+    # Compound directionals first. SpotHero's street_address spells them out
+    # ("105 Northeast 3rd Avenue") where our sheets abbreviate ("105 NE 3RD
+    # AVE"), and the single-word rules below can't help: \bnorth\b does not
+    # match inside "northeast". Without these the two normalize to
+    # "105northeast3rdave" vs "105ne3rdave" and a real lot is missed.
+    t = re.sub(r"\bnortheast\b", "ne", t)
+    t = re.sub(r"\bnorthwest\b", "nw", t)
+    t = re.sub(r"\bsoutheast\b", "se", t)
+    t = re.sub(r"\bsouthwest\b", "sw", t)
     t = re.sub(r"\bnorth\b", "n", t)
     t = re.sub(r"\bsouth\b", "s", t)
     t = re.sub(r"\beast\b", "e", t)
@@ -128,6 +138,10 @@ def _normalize_addr(text: str) -> str:
     t = re.sub(r"\bdrive\b", "dr", t)
     t = re.sub(r"\broad\b", "rd", t)
     t = re.sub(r"\blane\b", "ln", t)
+    t = re.sub(r"\bcourt\b", "ct", t)
+    t = re.sub(r"\bplace\b", "pl", t)
+    t = re.sub(r"\bparkway\b", "pkwy", t)
+    t = re.sub(r"\bhighway\b", "hwy", t)
     return re.sub(r"[^a-z0-9]", "", t)
 
 
@@ -138,17 +152,160 @@ def _extract_addr(section: str) -> str:
 
 
 def _section_matches(our: str, candidate: str) -> bool:
+    # A blank candidate must never match. "" is a substring of every string,
+    # so the old `c in o` test returned True for any result whose address
+    # field was empty — and _check_spothero takes the FIRST match, so one
+    # address-less lot could be reported as ours and its scarcity alerted on.
     o = _normalize(our)
     c = _normalize(candidate)
-    if o and (o in c or c in o):
+    if not o or not c:
+        return False
+    if o in c or c in o:
         return True
     oa = _normalize_addr(_extract_addr(our))
     ca = _normalize_addr(candidate)
-    return bool(oa) and len(oa) >= 4 and (oa in ca or ca in oa)
+    if len(oa) < 4 or len(ca) < 4:
+        return False
+    return oa in ca or ca in oa
+
+
+_LOT_STOPWORDS = {
+    "lot", "lots", "garage", "garages", "parking", "park", "self", "valet",
+    "covered", "uncovered", "north", "south", "east", "west", "street", "avenue",
+    "center", "centre", "only", "spot", "spots", "from", "venue", "away", "miles",
+    "mile", "the", "and", "inn", "hotel", "suites", "plaza", "tower", "shops",
+}
+
+
+def _lot_tokens(text: str) -> set:
+    """Distinctive words in a lot name — the ones that actually identify it."""
+    words = re.findall(r"[a-z]{4,}", text.lower())
+    return {w for w in words if w not in _LOT_STOPWORDS}
+
+
+def _lot_name_matches(our: str, candidate: str) -> bool:
+    """
+    Last-resort name match for lots that share a name but not a string.
+
+    Substring comparison misses real matches whenever either side adds words:
+    our "TANGER OUTLET LOT" against SpotHero's "6800 N 95th Ave - Tanger
+    Outlets - Glendale Lot" normalizes to "tangeroutletlot" vs
+    "...tangeroutletsglendalelot", which is neither a prefix nor a suffix.
+    Comparing distinctive words instead catches it.
+
+    Deliberately strict: generic parking vocabulary is excluded, and a single
+    shared word has to be at least six characters, so "Plaza Garage" cannot
+    claim "Plaza Tower and Courtyard Shops Garage".
+    """
+    ours, theirs = _lot_tokens(our), _lot_tokens(candidate)
+    if not ours or not theirs:
+        return False
+    shared = {o for o in ours for t in theirs
+              if o == t or (len(o) >= 5 and len(t) >= 5 and (o.startswith(t) or t.startswith(o)))}
+    if len(shared) >= 2:
+        return True
+    return any(len(w) >= 6 for w in shared)
+
+
+def _stated_miles(section: str) -> Optional[float]:
+    """The distance from the venue our own lot string claims, if it states one."""
+    m = re.search(r"(?i)([\d.]+)\s*(?:mi\b|mile|miles)", section)
+    if not m:
+        return None
+    try:
+        return float(m.group(1))
+    except ValueError:
+        return None
+
+
+def _anchor_is_plausible(our_coords: Optional[tuple], venue_coords: Optional[tuple],
+                         our_section: str) -> bool:
+    """
+    Sanity-check a geocoded lot against the distance its own name claims.
+
+    Street names repeat within a city as well as between cities. "1308 CLAY
+    ST" for a Toyota Center listing marked "0.1 MILES AWAY" geocoded ~5km from
+    the venue — same street name, wrong end of town. Believing it would anchor
+    the search in the wrong neighbourhood.
+    """
+    if our_coords is None or venue_coords is None:
+        return True                      # nothing to check against
+    stated = _stated_miles(our_section)
+    allowed_km = (stated * 1.609 * 3 + 1.0) if stated is not None else 8.0
+    return _haversine_m(our_coords, venue_coords) / 1000.0 <= allowed_km
+
+
+def _clean_event_name(event_name: str) -> str:
+    """
+    The event as the buying platforms name it.
+
+    Our sources sometimes carry a "Parking" suffix or a "Parking passes only"
+    prefix where SpotHero and ParkWhiz list the event itself. Lysted rows
+    arrive already cleaned by lysted_listings.clean_event_name, so this is a
+    no-op for them; it guards the ReachPro and events flows, which do not.
+    """
+    n = re.sub(r"(?i)^parking passes only\s+", "", event_name).strip()
+    n = re.sub(r"(?i)\s*[-\u2013]?\s*parking(\s+pass(es)?)?\s*$", "", n).strip()
+    return n or event_name
+
+
+def _event_name_matches(ours: str, theirs: str) -> bool:
+    """
+    Do these two names refer to the same event?
+
+    Tested both ways round on purpose. Our listings are frequently the more
+    verbose side — "James Taylor and His All-Star Band" where ParkWhiz simply
+    lists "James Taylor" — so requiring our name to sit inside theirs missed
+    real events. Either name may be the abbreviation of the other; the venue
+    and the +/-1 day window are what keep this from over-matching.
+    """
+    a = _normalize(ours)
+    b = _normalize(theirs)
+    if not a or not b:
+        return False
+    if a[:20] in b:
+        return True
+    return len(b) >= 8 and b[:20] in a
 
 
 def _clean_venue(venue: str) -> str:
     return re.sub(r"(?i)\s+parking(?:\s+lots?)?$", "", venue).strip()
+
+
+def _venue_key(name: str) -> str:
+    """
+    A venue name reduced to something comparable across platforms.
+
+    Beyond _normalize: drops a trailing "Parking", parenthetical qualifiers
+    ("(formerly Charleston Civic Center)"), and the word "and" together with
+    "&". That last one matters because _normalize deletes punctuation, so our
+    "Thomas and Mack Center" became "thomasandmackcenter" while SpotHero's
+    "Thomas & Mack Center" became "thomasmackcenter" — neither contains the
+    other, and a real event was discarded on every comparison.
+    """
+    n = _clean_venue(name or "")
+    n = re.sub(r"\([^)]*\)", " ", n)
+    n = re.sub(r"(?i)\band\b|&", " ", n)
+    return _normalize(n)
+
+
+def _venue_matches(ours: str, theirs: str) -> bool:
+    """Do these two venue names refer to the same place?"""
+    a, b = _venue_key(ours), _venue_key(theirs)
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    if (a in b or b in a) and min(len(a), len(b)) >= _PW_VENUE_MIN_OVERLAP:
+        return True
+    # "Highland Festival Grounds at Kentucky Exposition Center" is listed by
+    # the platforms as the parent complex it sits inside.
+    for x, y in ((ours, b), (theirs, a)):
+        if " at " in (x or "").lower():
+            tail = _venue_key(re.split(r"(?i)\s+at\s+", x, maxsplit=1)[-1])
+            if tail and len(tail) >= _PW_VENUE_MIN_OVERLAP and (tail == y or tail in y or y in tail):
+                return True
+    return False
 
 
 def _strip_brand(section: str) -> str:
@@ -157,6 +314,131 @@ def _strip_brand(section: str) -> str:
     cleaned = re.sub(r"\s*[-–].*?(mi|away|walk|venue).*$", "", cleaned, flags=re.I).strip()
     cleaned = re.sub(r"\s+(parking\s+corp\.?|llc\s+garage|garage|parking\s+llc|lot)$", "", cleaned, flags=re.I).strip()
     return cleaned or section
+
+
+def _addr_for_geocode(section: str) -> str:
+    """
+    Our lot string reduced to something a geocoder can resolve.
+
+    Deliberately separate from _extract_addr, which the facility/events flows
+    also use: this strips more aggressively and only the Lysted path wants
+    that. Lysted lot names carry trailing noise that defeats Nominatim —
+    "1308 CLAY ST GARAGE (0.1 MILES AWAY)" and "810 WASHINGTON ST. LOT" both
+    fail, while "1308 Clay St" and "810 Washington St" resolve.
+    """
+    s = _extract_addr(section)
+    s = re.sub(r"\([^)]*\)", " ", s)                       # "(0.1 MILES AWAY)", "(LOT 8013)"
+    s = re.sub(r"(?i)\b\d+(\.\d+)?\s*miles?\b.*$", " ", s)  # a distance the split missed
+    s = re.sub(r"(?i)[\s,.-]+(lot|garage|parking(\s+lot)?)\s*$", " ", s)
+    s = re.sub(r"[\s,.-]+$", "", s)
+    return re.sub(r"\s{2,}", " ", s).strip()
+
+
+def _addr_fragment(text: str) -> str:
+    """One candidate cleaned up, or "" if it is not a street address."""
+    t = text.strip()
+    if re.match(r"(?i)^[\d.]+\s*(mi|mile|miles)\b", t):
+        return ""                                        # "0.7 MILES AWAY"
+    t = re.sub(r"(?i)\b[\d.]+\s*miles?\b.*$", " ", t)
+    t = re.sub(r"(?i)[\s,.-]+(lot|garage|parking(\s+lot)?)[\s.]*$", " ", t)
+    t = re.sub(r"[\s,.-]+$", "", t).strip()
+    if len(t) < 5 or not re.match(r"^\d", t):
+        return ""                                        # must start with a street number
+    return re.sub(r"\s{2,}", " ", t)
+
+
+def _addr_candidates(section: str) -> list:
+    """
+    Every street address hiding in one lot string, best first.
+
+    The address is often not at the front. Our lot strings are frequently
+    "NAME - ADDRESS" or "NAME (ADDRESS)" — "ATHENS HOTEL & SUITES - 1308 CLAY
+    ST GARAGE", "LEELAND (1515 SAN JACINTO STREET)", "THAXTON LOT - 615 SCOTT
+    ST." — and taking only the head threw the address away, leaving a hotel
+    name no geocoder could place.
+    """
+    out = []
+    for inner in re.findall(r"\(([^)]*)\)", section):
+        c = _addr_fragment(inner)
+        if c:
+            out.append(c)
+    body = re.sub(r"\([^)]*\)", " ", section)
+    for part in re.split(r"\s+[-\u2013]\s*|\s*[-\u2013]\s+", body):
+        c = _addr_fragment(part)
+        if c:
+            out.append(c)
+    head = _addr_for_geocode(section)
+    if head and re.match(r"^\d", head) and len(head) >= 5:
+        out.append(head)
+    seen, uniq = set(), []
+    for c in out:
+        k = c.lower()
+        if k not in seen:
+            seen.add(k)
+            uniq.append(c)
+    return uniq
+
+
+def _haversine_m(a: tuple[float, float], b: tuple[float, float]) -> float:
+    """Metres between two (lat, lon) points."""
+    lat1, lon1, lat2, lon2 = map(math.radians, (a[0], a[1], b[0], b[1]))
+    h = (math.sin((lat2 - lat1) / 2) ** 2
+         + math.cos(lat1) * math.cos(lat2) * math.sin((lon2 - lon1) / 2) ** 2)
+    return 2 * 6371000.0 * math.asin(min(1.0, math.sqrt(h)))
+
+
+# How close a competitor's pin must be to our geocoded address to call it the
+# same physical lot.
+#
+# These are tight on purpose. A downtown block is only 80-120m, so a loose
+# radius silently matches the garage on the NEXT block: at 150m this matched
+# our "510 S Presa St" to "609 S Alamo St" and our "323 NW 4th St" to "310 NW
+# 5th St". A wrong match is worse than no match — it would tell the listing
+# team to deactivate a listing because someone else's lot sold out.
+#
+# Inside _EXACT_SPOT_METRES, position alone is enough. Between that and
+# _SAME_LOT_METRES it must also be on the same street, which is what lets
+# "810 Washington St" match a pin geocoded to 820, or "180 N Franklin St"
+# match the "Lake-Franklin Garage" on the corner.
+_EXACT_SPOT_METRES = 30.0
+_SAME_LOT_METRES = 60.0
+
+_STREET_NOISE = re.compile(
+    r"(?i)\b(n|s|e|w|ne|nw|se|sw|north|south|east|west|"
+    r"st|street|ave|avenue|blvd|boulevard|dr|drive|rd|road|ln|lane|"
+    r"ct|court|pl|place|pkwy|parkway|hwy|highway|lot|garage|parking)\b")
+
+
+def _street_token(section: str) -> str:
+    """The bare street name from our lot string: "500 LEE ST. E." -> "lee"."""
+    s = _addr_for_geocode(section) or section
+    s = re.sub(r"^\s*\d+[a-z]?\s+", " ", s, flags=re.I)   # leading house number
+    return _normalize(_STREET_NOISE.sub(" ", s))
+
+
+def _geocode_our_lot(our_section: str, city: str = "", state: str = "") -> Optional[tuple[float, float]]:
+    """
+    Locate OUR lot directly, rather than the venue it happens to sit near.
+
+    This mirrors what the facility flow gets for free from
+    geocode_by_spothero_facility_id(): an anchor on our own lot. Lysted rows
+    carry no facility id, but they do carry City/State alongside a lot string
+    that is usually a street address, and "500 LEE ST E, Charleston, WV"
+    resolves where the bare address does not.
+    """
+    where = ", ".join(p for p in (city, state) if p)
+    for addr in _addr_candidates(our_section):
+        # With a city/state to hand, never fall back to the bare address: a
+        # street name repeats across the country and the unqualified query
+        # silently lands in the wrong one. "4811-US 301 N" for a Tampa, FL
+        # listing resolved to Fayetteville, NC — a confident anchor 600 miles
+        # from the lot, which is worse than having no anchor at all.
+        queries = [f"{addr}, {where}"] if where else [addr]
+        for q in queries:
+            coords = _geocode(q)
+            if coords:
+                return coords
+    return None
 
 
 def _parse_event_dt(event_date: str) -> Optional[datetime]:
@@ -233,9 +515,11 @@ def _geocode(query: str) -> Optional[tuple[float, float]]:
     return coords
 
 
-def _geocode_venue(event_venue: str, our_section: str) -> Optional[tuple[float, float]]:
+def _geocode_venue(event_venue: str, our_section: str,
+                   city: str = "", state: str = "") -> Optional[tuple[float, float]]:
     clean_venue = _clean_venue(event_venue) if event_venue else ""
     is_generic = _normalize(our_section) in ("generaladmission", "generalparking", "")
+    where = ", ".join(p for p in (city, state) if p)
 
     if not is_generic and our_section:
         cleaned = _strip_brand(our_section)
@@ -245,9 +529,21 @@ def _geocode_venue(event_venue: str, our_section: str) -> Optional[tuple[float, 
             return coords
 
     if clean_venue:
-        coords = _geocode(clean_venue)
-        if coords:
-            return coords
+        # Progressively looser forms. OpenStreetMap often knows a venue under
+        # its parent complex or an older name: "Highland Festival Grounds at
+        # Kentucky Exposition Center" is unknown but "Kentucky Exposition
+        # Center" resolves, and city/state disambiguates common venue names.
+        candidates = [clean_venue]
+        if where:
+            candidates.insert(0, f"{clean_venue}, {where}")
+        if " at " in clean_venue.lower():
+            tail = re.split(r"(?i)\s+at\s+", clean_venue, maxsplit=1)[-1].strip()
+            if tail:
+                candidates += ([f"{tail}, {where}"] if where else []) + [tail]
+        for q in candidates:
+            coords = _geocode(q)
+            if coords:
+                return coords
 
     return None
 
@@ -256,10 +552,7 @@ def _geocode_venue(event_venue: str, our_section: str) -> Optional[tuple[float, 
 # SpotHero — exact spots_left + capacity
 # ---------------------------------------------------------------------------
 
-def _find_spothero_event(event_name: str, event_date: str, event_venue: str) -> Optional[dict]:
-    clean_venue = _clean_venue(event_venue)
-    clean_name = re.sub(r"(?i)^parking passes only\s+", "", event_name).strip()
-    query = f"{clean_name} {clean_venue}"
+def _spothero_event_search(query: str) -> list:
     resp = _throttled_get(
         _spothero_throttle_obj, f"{_SPOTHERO_API}/events/search",
         params={"search_query": query},
@@ -267,32 +560,56 @@ def _find_spothero_event(event_name: str, event_date: str, event_venue: str) -> 
         timeout=10,
     )
     try:
-        results = resp.json().get("results", []) if resp is not None and resp.ok else []
+        return resp.json().get("results", []) if resp is not None and resp.ok else []
     except Exception:
+        return []
+
+
+def _find_spothero_event(event_name: str, event_date: str, event_venue: str) -> Optional[dict]:
+    clean_venue = _clean_venue(event_venue)
+    clean_name = _clean_event_name(event_name)
+    target_dt = _parse_event_dt(event_date) if event_date else None
+
+    def _pick(results: list) -> Optional[dict]:
+        for r in results:
+            if not _venue_matches(clean_venue, r.get("destination_title", "")):
+                continue
+            if target_dt:
+                try:
+                    ev_dt = datetime.fromisoformat(r["starts"].replace("Z", "+00:00")).replace(tzinfo=None)
+                    if abs((ev_dt - target_dt).days) > 1:
+                        continue
+                except Exception:
+                    pass
+            dest_info = r.get("destination", {})
+            return {
+                "event_id": r["event_id"],
+                "lat": dest_info.get("latitude"),
+                "lon": dest_info.get("longitude"),
+                "starts": r.get("parking_window", {}).get("starts", r["starts"])[:19],
+                "ends": r.get("parking_window", {}).get("ends", "")[:19],
+            }
         return None
 
-    target_dt = _parse_event_dt(event_date) if event_date else None
-    norm_venue = _normalize(clean_venue)
+    # Name plus venue first. When SpotHero titles the event differently from
+    # our sheet the combined query returns nothing useful, so fall back to
+    # searching the venue alone and matching on name and date within it —
+    # previously a single miss here dropped the event scoping entirely, and
+    # an unscoped search returns markedly less inventory.
+    queries = [f"{clean_name} {clean_venue}".strip()]
+    if clean_venue:
+        queries.append(clean_venue)
+    if clean_name:
+        queries.append(clean_name)
 
-    for r in results:
-        dest = _normalize(r.get("destination_title", ""))
-        if not (norm_venue in dest or dest in norm_venue):
+    seen = set()
+    for q in queries:
+        if not q or q in seen:
             continue
-        if target_dt:
-            try:
-                ev_dt = datetime.fromisoformat(r["starts"].replace("Z", "+00:00")).replace(tzinfo=None)
-                if abs((ev_dt - target_dt).days) > 1:
-                    continue
-            except Exception:
-                pass
-        dest_info = r.get("destination", {})
-        return {
-            "event_id": r["event_id"],
-            "lat": dest_info.get("latitude"),
-            "lon": dest_info.get("longitude"),
-            "starts": r.get("parking_window", {}).get("starts", r["starts"])[:19],
-            "ends": r.get("parking_window", {}).get("ends", "")[:19],
-        }
+        seen.add(q)
+        hit = _pick(_spothero_event_search(q))
+        if hit:
+            return hit
     return None
 
 
@@ -438,12 +755,92 @@ def _search_spothero_transient(lat: float, lon: float, starts_str: str, ends_str
         return [], str(exc)
 
 
-def _fetch_spothero_lots(event_name: str, event_venue: str, event_date: str, our_section: str) -> tuple[list, Optional[str]]:
+def _spothero_window(event_date: str) -> tuple[str, str]:
+    """The search window for an event: its start, or tonight, plus five hours."""
+    target_dt = _parse_event_dt(event_date) if event_date else None
+    starts = target_dt or datetime.now().replace(hour=19, minute=0, second=0, microsecond=0)
+    ends = starts + timedelta(hours=5)
+    return (starts.strftime("%Y-%m-%dT%H:%M:%S"), ends.strftime("%Y-%m-%dT%H:%M:%S"))
+
+
+def _pick_our_lot(results: list, our_section: str,
+                  our_coords: Optional[tuple[float, float]]) -> Optional[dict]:
+    """
+    Which of these results is our lot? Position first, text second.
+
+    Coordinates are the stronger evidence: two listings of the same garage
+    routinely disagree on wording and even street number, but not on where
+    they are. This is the closest the Lysted flow can get to the facility
+    flow's exact facility-id comparison (clustering._is_ours), which needs an
+    id these rows don't carry.
+    """
+    if our_coords:
+        near = sorted(
+            ((_haversine_m(our_coords, c), r)
+             for r in results
+             for c in [_spot_coords(r)] if c),
+            key=lambda pair: pair[0],   # never fall through to comparing the dicts
+        )
+        token = _street_token(our_section)
+        for dist, r in near:
+            if dist > _SAME_LOT_METRES:
+                break
+            if dist <= _EXACT_SPOT_METRES:
+                return r
+            if len(token) >= 3 and token in _normalize(f"{_spot_addr(r)} {_spot_name(r)}"):
+                return r
+
+    for r in results:
+        if _section_matches(our_section, _spot_addr(r)) or _section_matches(our_section, _spot_name(r)):
+            return r
+    for r in results:
+        if _lot_name_matches(our_section, _spot_name(r)):
+            return r
+    return None
+
+
+def _ring_points(centre: tuple, miles: float, n: int = 6) -> list:
+    """n points evenly spaced on a circle of the given radius around centre."""
+    lat, lon = centre
+    km = max(0.3, miles * 1.609)
+    dlat = km / 111.32
+    dlon = km / (111.32 * max(0.2, math.cos(math.radians(lat))))
+    return [(lat + dlat * math.sin(2 * math.pi * i / n),
+             lon + dlon * math.cos(2 * math.pi * i / n)) for i in range(n)]
+
+
+def _sweep_spothero(centre: tuple, miles: float, starts: str, ends: str,
+                    event_id: Optional[str]) -> list:
+    """
+    Widen a search that SpotHero refuses to widen itself.
+
+    Its transient search returns at most 15 lots however you ask — per_page,
+    limit, max_results and radius are all ignored — and they are the 15
+    nearest the anchor. A lot three quarters of a mile out is simply never in
+    them. Sampling a ring at the distance our own lot string claims brings
+    that band into view: around American Airlines Center this turns 15
+    reachable lots into 69.
+    """
+    seen, out = set(), []
+    for lat, lon in _ring_points(centre, miles):
+        res, err = _search_spothero_transient(lat, lon, starts, ends, event_id,
+                                              include_unavailable=True)
+        if err:
+            continue
+        for r in res:
+            key = _spot_facility_id(r) or _spot_name(r)
+            if key and key not in seen:
+                seen.add(key)
+                out.append(r)
+    return out
+
+
+def _fetch_spothero_lots(event_name: str, event_venue: str, event_date: str, our_section: str,
+                         city: str = "", state: str = "") -> tuple[list, Optional[str]]:
     """Fetch all SpotHero lots near the venue/time. Returns (results, error)."""
     if not event_venue and not our_section:
         return [], "no location data"
 
-    target_dt = _parse_event_dt(event_date) if event_date else None
     sh_event = _find_spothero_event(event_name, event_date, event_venue)
 
     if sh_event:
@@ -452,17 +849,24 @@ def _fetch_spothero_lots(event_name: str, event_venue: str, event_date: str, our
         ends_str = sh_event["ends"]
         event_id_param = sh_event["event_id"]
     else:
-        coords = _geocode_venue(event_venue, our_section)
+        # Venue first, then our own lot. A lot we can place is a usable anchor
+        # even when the venue name means nothing to OpenStreetMap.
+        coords = _geocode_venue(event_venue, our_section, city, state) \
+            or _geocode_our_lot(our_section, city, state)
         if not coords:
             return [], "could not geocode venue"
         lat, lon = coords
-        starts = target_dt or datetime.now().replace(hour=19, minute=0, second=0, microsecond=0)
-        ends = starts + timedelta(hours=5)
-        starts_str = starts.strftime("%Y-%m-%dT%H:%M:%S")
-        ends_str = ends.strftime("%Y-%m-%dT%H:%M:%S")
+        starts_str, ends_str = _spothero_window(event_date)
         event_id_param = None
 
-    return _search_spothero_transient(lat, lon, starts_str, ends_str, event_id_param)
+    # Keep sold-out lots. SpotHero hides them by default, which is fatal here:
+    # a lot that has sold out is exactly what this scan looks for, and hiding
+    # it makes our own listing look absent instead ("our lot not found among
+    # nearby results"). Our "105 NE 3RD AVE" in Miami was reported missing for
+    # this reason while SpotHero was listing it, sold out, 11m away. The
+    # facility flow already searches this way (fetch_spothero_lots_near).
+    return _search_spothero_transient(lat, lon, starts_str, ends_str, event_id_param,
+                                      include_unavailable=True)
 
 
 def fetch_spothero_lots_near(lat: float, lon: float, start_hour: int = 10, end_hour: int = 22) -> tuple[list, Optional[str]]:
@@ -499,12 +903,13 @@ def fetch_spothero_lots_near(lat: float, lon: float, start_hour: int = 10, end_h
     )
 
 
-def _check_spothero(event_name: str, event_venue: str, event_date: str, our_section: str) -> dict:
+def _check_spothero(event_name: str, event_venue: str, event_date: str, our_section: str,
+                    city: str = "", state: str = "") -> dict:
     base = {"platform": "spothero", "is_available": None, "price": None,
             "spots_left": None, "capacity": None, "percent_remaining": None,
             "availability_status": None, "scarcity_level": "unknown", "error": None}
 
-    results, err = _fetch_spothero_lots(event_name, event_venue, event_date, our_section)
+    results, err = _fetch_spothero_lots(event_name, event_venue, event_date, our_section, city, state)
     if err:
         return {**base, "error": err}
 
@@ -518,12 +923,51 @@ def _check_spothero(event_name: str, event_venue: str, event_date: str, our_sect
     is_generic = _normalize(our_section) in ("generaladmission", "generalparking", "")
 
     if not is_generic:
-        matched = [
-            r for r in results
-            if _section_matches(our_section, _spot_addr(r)) or _section_matches(our_section, _spot_name(r))
-        ]
-        if matched:
-            r = matched[0]
+        our_coords = _geocode_our_lot(our_section, city, state)
+        if not _anchor_is_plausible(our_coords, _geocode_venue(event_venue, "", city, state), our_section):
+            logger.debug("Discarding implausible anchor for %r", our_section)
+            our_coords = None
+        r = _pick_our_lot(results, our_section, our_coords)
+
+        if r is None and our_coords is None:
+            # No address to anchor on, so we cannot re-centre the search.
+            # Sweep the band our lot says it sits in instead and match on name.
+            venue_coords = _geocode_venue(event_venue, our_section, city, state)
+            if venue_coords:
+                sh_event = _find_spothero_event(event_name, event_date, event_venue)
+                if sh_event:
+                    starts_str, ends_str = sh_event["starts"], sh_event["ends"]
+                    sweep_event_id = sh_event["event_id"]
+                else:
+                    starts_str, ends_str = _spothero_window(event_date)
+                    sweep_event_id = None
+                wide = _sweep_spothero(venue_coords, _stated_miles(our_section) or 0.8,
+                                       starts_str, ends_str, sweep_event_id)
+                if wide:
+                    r = _pick_our_lot(wide, our_section, None)
+
+        if r is None and our_coords:
+            # The venue-anchored search may simply not reach our lot — it is
+            # centred on the venue, and these listings sit up to a mile out.
+            # Re-run centred on the lot itself before concluding it is absent.
+            # Reuse the event's own window and id when SpotHero knows the
+            # event: scoping the search to it returns markedly more inventory
+            # (24 lots vs 15 on one Wilmington listing) because event-only
+            # lots are otherwise absent.
+            sh_event = _find_spothero_event(event_name, event_date, event_venue)
+            if sh_event:
+                starts_str, ends_str = sh_event["starts"], sh_event["ends"]
+                retry_event_id = sh_event["event_id"]
+            else:
+                starts_str, ends_str = _spothero_window(event_date)
+                retry_event_id = None
+            nearby, retry_err = _search_spothero_transient(
+                our_coords[0], our_coords[1], starts_str, ends_str,
+                retry_event_id, include_unavailable=True)
+            if not retry_err and nearby:
+                r = _pick_our_lot(nearby, our_section, our_coords)
+
+        if r is not None:
             scarcity = _spot_scarcity(r)
             return {**base, "is_available": True, "price": _spot_price(r), **scarcity}
         # Other lots exist nearby but not our specific lot — likely not listed
@@ -538,7 +982,8 @@ def _check_spothero(event_name: str, event_venue: str, event_date: str, our_sect
     return {**base, "is_available": True, "price": _spot_price(r), **scarcity}
 
 
-def list_spothero_lots(event_name: str, event_venue: str, event_date: str, our_section: str = "") -> list[dict]:
+def list_spothero_lots(event_name: str, event_venue: str, event_date: str, our_section: str = "",
+                       city: str = "", state: str = "") -> list[dict]:
     """
     Return every SpotHero lot found near the venue/time, each with its own
     spots_left/capacity/price — for events with multiple competing lots.
@@ -552,6 +997,11 @@ def list_spothero_lots(event_name: str, event_venue: str, event_date: str, our_s
         scarcity = _spot_scarcity(r)
         lots.append({
             "platform": "spothero",
+            # SpotHero's own facility id. Two distinct lots can share a name
+            # AND an address (103 Centennial Olympic Park Dr. lists two at
+            # different prices), which made "the previous price for this lot"
+            # ambiguous and manufactured a permanent phantom spike.
+            "lot_id": _spot_facility_id(r),
             "lot_name": _spot_name(r),
             "lot_address": _spot_addr(r),
             "price": _spot_price(r),
@@ -569,53 +1019,140 @@ def list_spothero_lots(event_name: str, event_venue: str, event_date: str, our_s
 # ---------------------------------------------------------------------------
 
 _PW_VENUE_CACHE: list = []
+_PW_VENUE_PAGES_LOADED = 0
+_PW_VENUE_EXHAUSTED = False
+_PW_VENUE_LOCK = threading.Lock()
+
+# ParkWhiz's /venues/ has no search parameter — every one we tried (q, search,
+# name, query) is ignored and returns the same default page — so the only way
+# to resolve a venue name to an id is to page through the list. It is huge
+# (still returning rows at 40,000) and unsorted by relevance: Red Hat
+# Amphitheater is on page 57, Kia Forum on page 84, Levi's Stadium on page
+# 105. The old fixed 24-page stop saw 2,400 of them, so most venues resolved
+# to nothing and every event there failed as "event not found on ParkWhiz".
+#
+# Pages are fetched lazily and kept for the life of the process: common
+# venues are found in the first few pages and cost nothing extra, and only a
+# miss pays to extend the cache.
+_PW_VENUE_FIRST_PAGES = 24
+_PW_VENUE_MAX_PAGES = 400
+
+
+def _load_pw_venue_pages(target_pages: int) -> list:
+    """Extend the cached venue list to at least target_pages, then return it."""
+    global _PW_VENUE_PAGES_LOADED, _PW_VENUE_EXHAUSTED
+    target_pages = min(target_pages, _PW_VENUE_MAX_PAGES)
+    with _PW_VENUE_LOCK:
+        while not _PW_VENUE_EXHAUSTED and _PW_VENUE_PAGES_LOADED < target_pages:
+            page = _PW_VENUE_PAGES_LOADED + 1
+            resp = _throttled_get(_parkwhiz_throttle_obj, f"{_PARKWHIZ_API}/venues/",
+                                  params={"per_page": 100, "page": page},
+                                  headers=_PARKWHIZ_HEADERS, timeout=10)
+            if resp is None:
+                break  # transient — stop here, retry on the next scan
+            try:
+                batch = resp.json() if resp.ok and isinstance(resp.json(), list) else []
+            except Exception:
+                break
+            if not batch:
+                _PW_VENUE_EXHAUSTED = True
+                break
+            _PW_VENUE_CACHE.extend(batch)
+            _PW_VENUE_PAGES_LOADED = page
+        return _PW_VENUE_CACHE
 
 
 def _get_pw_venues() -> list:
-    global _PW_VENUE_CACHE
-    if _PW_VENUE_CACHE:
-        return _PW_VENUE_CACHE
-    venues = []
-    for page in range(1, 25):
-        resp = _throttled_get(_parkwhiz_throttle_obj, f"{_PARKWHIZ_API}/venues/",
-                               params={"per_page": 100, "page": page},
-                               headers=_PARKWHIZ_HEADERS, timeout=10)
-        if resp is None:
-            break
-        try:
-            batch = resp.json() if resp.ok and isinstance(resp.json(), list) else []
-            if not batch:
-                break
-            venues.extend(batch)
-        except Exception:
-            break
-    _PW_VENUE_CACHE = venues
-    return venues
+    return _load_pw_venue_pages(_PW_VENUE_FIRST_PAGES)
 
 
-def _find_parkwhiz_venue_id(event_venue: str) -> Optional[int]:
-    clean_v = _clean_venue(event_venue)
-    norm_v = _normalize(clean_v)
-    venues = _get_pw_venues()
+# Shortest normalized overlap that counts as naming the same venue. Without a
+# floor, ParkWhiz's short entries swallow everything by substring: "Masa"
+# matched "Thomas and Mack Center" ("tho-masa-ndmackcenter"), "Arena" matched
+# "Simmons Bank Arena", "Heat" matched "Acrisure Amphitheater". An exact name
+# is always accepted, which keeps genuinely short ones like "Stage AE".
+_PW_VENUE_MIN_OVERLAP = 8
+
+
+def _venue_in_place(v: dict, city: str, state: str) -> bool:
+    """Is this catalogue entry in the city/state our listing names?"""
+    if not state:
+        return False
+    if _normalize(v.get("state") or "") != _normalize(state):
+        return False
+    if city and _normalize(v.get("city") or "") != _normalize(city):
+        return False
+    return True
+
+
+def _best_pw_venue(norm_v: str, venues: list) -> Optional[int]:
     best_id, best_score = None, 0
     for v in venues:
-        vn = _normalize(v.get("name", ""))
+        vn = _venue_key(v.get("name", ""))
         if not vn:
             continue
+        if vn == norm_v:
+            return v["id"]
         if vn in norm_v or norm_v in vn:
             score = min(len(vn), len(norm_v))
-            if score > best_score:
+            if score >= _PW_VENUE_MIN_OVERLAP and score > best_score:
                 best_score, best_id = score, v["id"]
     return best_id
 
 
-def _find_parkwhiz_event_id(event_name: str, event_date: str, event_venue: str,
-                             coords: Optional[tuple[float, float]] = None) -> Optional[int]:
-    target_dt = _parse_event_dt(event_date) if event_date else None
-    clean_name = re.sub(r"(?i)^parking passes only\s+", "", event_name).strip()
-    norm_name = _normalize(clean_name[:20])
+def _best_pw_venue_in_place(our_venue: str, norm_v: str, venues: list,
+                            city: str, state: str) -> Optional[int]:
+    """
+    Match within the listing's own city, where loose matching is safe.
 
-    venue_id = _find_parkwhiz_venue_id(event_venue)
+    Nationally, a short or generic name has to be rejected — "Arena" would
+    otherwise swallow "Simmons Bank Arena", and a "Performing Arts Center" in
+    the wrong state would answer for ours. Inside one city there are only a
+    handful of venues, so word overlap is enough to identify the right one and
+    catches the names the strict pass cannot: differing punctuation, a
+    sponsor's name added or dropped, "Arena" vs "Arena at X".
+    """
+    local = [v for v in venues if _venue_in_place(v, city, state)]
+    if not local:
+        return None
+    best_id, best_score = None, 0
+    for v in local:
+        vn = _venue_key(v.get("name", ""))
+        if not vn:
+            continue
+        if vn == norm_v:
+            return v["id"]
+        if (vn in norm_v or norm_v in vn) and min(len(vn), len(norm_v)) >= 5:
+            score = min(len(vn), len(norm_v))
+            if score > best_score:
+                best_score, best_id = score, v["id"]
+    if best_id is not None:
+        return best_id
+    for v in local:
+        if _lot_name_matches(our_venue, v.get("name", "")):
+            return v["id"]
+    return None
+
+
+def _find_parkwhiz_venue_id(event_venue: str, city: str = "", state: str = "") -> Optional[int]:
+    norm_v = _venue_key(event_venue)
+    if not norm_v:
+        return None
+    for venues in (_get_pw_venues(), _load_pw_venue_pages(_PW_VENUE_MAX_PAGES)):
+        vid = (_best_pw_venue(norm_v, venues)
+               or _best_pw_venue_in_place(event_venue, norm_v, venues, city, state))
+        if vid is not None:
+            return vid
+    return None
+
+
+def _find_parkwhiz_event_id(event_name: str, event_date: str, event_venue: str,
+                             coords: Optional[tuple[float, float]] = None,
+                             city: str = "", state: str = "") -> Optional[int]:
+    target_dt = _parse_event_dt(event_date) if event_date else None
+    clean_name = _clean_event_name(event_name)
+
+    venue_id = _find_parkwhiz_venue_id(event_venue, city, state)
     if venue_id is not None:
         ev_resp = _throttled_get(
             _parkwhiz_throttle_obj, f"{_PARKWHIZ_V31}/venues/{venue_id}/events",
@@ -628,7 +1165,7 @@ def _find_parkwhiz_event_id(event_name: str, event_date: str, event_venue: str,
             events = []
 
         for ev in events:
-            if norm_name not in _normalize(ev.get("name", "")):
+            if not _event_name_matches(clean_name, ev.get("name", "")):
                 continue
             if target_dt:
                 try:
@@ -658,7 +1195,7 @@ def _find_parkwhiz_event_id(event_name: str, event_date: str, event_venue: str,
         return None
 
     for ev in events:
-        if norm_name not in _normalize(ev.get("name", "")):
+        if not _event_name_matches(clean_name, ev.get("name", "")):
             continue
         if target_dt:
             try:
@@ -727,16 +1264,49 @@ def _query_parkwhiz_quotes(lat: float, lon: float, start_time: str, end_time: st
     return lots, None
 
 
-def _fetch_parkwhiz_lots(event_name: str, event_date: str, event_venue: str, our_section: str) -> tuple[list, Optional[str]]:
+def _pick_our_pw_lot(lots: list, our_section: str,
+                     our_coords: Optional[tuple[float, float]]) -> Optional[dict]:
+    """_pick_our_lot's counterpart for ParkWhiz quotes, which carry their own
+    entrance coordinates. Same rule: position first, then text."""
+    if our_coords:
+        near = sorted(((_haversine_m(our_coords, l["coords"]), l)
+                       for l in lots if l.get("coords")),
+                      key=lambda pair: pair[0])
+        token = _street_token(our_section)
+        for dist, l in near:
+            if dist > _SAME_LOT_METRES:
+                break
+            if dist <= _EXACT_SPOT_METRES:
+                return l
+            if len(token) >= 3 and token in _normalize(f"{l.get('address','')} {l.get('name','')}"):
+                return l
+    for l in lots:
+        if _section_matches(our_section, l["name"]) or _section_matches(our_section, l["address"]):
+            return l
+    for l in lots:
+        if _lot_name_matches(our_section, f'{l.get("name","")} {l.get("address","")}'):
+            return l
+    return None
+
+
+def _fetch_parkwhiz_lots(event_name: str, event_date: str, event_venue: str, our_section: str,
+                         city: str = "", state: str = "",
+                         anchor_coords: Optional[tuple[float, float]] = None) -> tuple[list, Optional[str]]:
     """Fetch all ParkWhiz lot quotes for this event. Returns (lots, error)."""
     if not event_name or not event_venue:
         return [], "missing event info"
 
-    coords = _geocode_venue(event_venue, our_section)
-    pw_event_id = _find_parkwhiz_event_id(event_name, event_date, event_venue, coords)
+    coords = _geocode_venue(event_venue, our_section, city, state) \
+        or _geocode_our_lot(our_section, city, state)
+    pw_event_id = _find_parkwhiz_event_id(event_name, event_date, event_venue, coords, city, state)
     if pw_event_id is None:
         return [], "event not found on ParkWhiz"
 
+    # The event_id already pins the event; the coordinates only set the search
+    # bounds (~2km). Centring them on our own lot is what brings a lot a mile
+    # out from the venue inside the box.
+    if anchor_coords is not None:
+        coords = anchor_coords
     if coords is None:
         coords = (_MSG_LAT, _MSG_LON)
     lat, lon = coords
@@ -778,12 +1348,13 @@ def fetch_parkwhiz_lots_near(lat: float, lon: float, start_hour: int = 10, end_h
     )
 
 
-def _check_parkwhiz(event_name: str, event_date: str, event_venue: str, our_section: str) -> dict:
+def _check_parkwhiz(event_name: str, event_date: str, event_venue: str, our_section: str,
+                    city: str = "", state: str = "") -> dict:
     base = {"platform": "parkwhiz", "is_available": None, "price": None,
             "spots_left": None, "capacity": None, "percent_remaining": None,
             "availability_status": None, "scarcity_level": "unknown", "error": None}
 
-    lots, err = _fetch_parkwhiz_lots(event_name, event_date, event_venue, our_section)
+    lots, err = _fetch_parkwhiz_lots(event_name, event_date, event_venue, our_section, city, state)
     if err == "event not found on ParkWhiz":
         # ParkWhiz genuinely has no matching event for this venue/date — a
         # confirmed absence, not a failed check. Same category as the other
@@ -804,9 +1375,22 @@ def _check_parkwhiz(event_name: str, event_date: str, event_venue: str, our_sect
 
     is_generic = _normalize(our_section) in ("generaladmission", "generalparking", "")
     if not is_generic:
-        matched = [l for l in lots if _section_matches(our_section, l["name"]) or _section_matches(our_section, l["address"])]
-        if matched:
-            l = matched[0]
+        our_coords = _geocode_our_lot(our_section, city, state)
+        if not _anchor_is_plausible(our_coords, _geocode_venue(event_venue, "", city, state), our_section):
+            our_coords = None
+        l = _pick_our_pw_lot(lots, our_section, our_coords)
+
+        if l is None and our_coords:
+            # The quote bounds are ~2km around the venue; our lot can sit
+            # outside them. Re-ask centred on the lot, still scoped to the
+            # same event.
+            retry, retry_err = _fetch_parkwhiz_lots(event_name, event_date, event_venue,
+                                                    our_section, city, state,
+                                                    anchor_coords=our_coords)
+            if not retry_err and retry:
+                l = _pick_our_pw_lot(retry, our_section, our_coords)
+
+        if l is not None:
             return {**base, "is_available": l["status"] != "sold_out", "price": l["price"],
                     "availability_status": l["status"], "scarcity_level": _level(l["status"])}
         # Other lots exist for this event but not our specific lot.
@@ -821,12 +1405,13 @@ def _check_parkwhiz(event_name: str, event_date: str, event_venue: str, our_sect
             "availability_status": l["status"], "scarcity_level": _level(l["status"])}
 
 
-def list_parkwhiz_lots(event_name: str, event_date: str, event_venue: str, our_section: str = "") -> list[dict]:
+def list_parkwhiz_lots(event_name: str, event_date: str, event_venue: str, our_section: str = "",
+                       city: str = "", state: str = "") -> list[dict]:
     """
     Return every ParkWhiz lot found for this event, each with its own
     availability status — for events with multiple competing lots.
     """
-    lots, err = _fetch_parkwhiz_lots(event_name, event_date, event_venue, our_section)
+    lots, err = _fetch_parkwhiz_lots(event_name, event_date, event_venue, our_section, city, state)
     if err or not lots:
         return []
 
@@ -858,24 +1443,26 @@ def list_parkwhiz_lots(event_name: str, event_date: str, event_venue: str, our_s
 # Main entry point
 # ---------------------------------------------------------------------------
 
-def check_scarcity(event_name: str, event_date: str, event_venue: str, our_section: str) -> dict:
+def check_scarcity(event_name: str, event_date: str, event_venue: str, our_section: str,
+                   city: str = "", state: str = "") -> dict:
     """Check SpotHero and ParkWhiz scarcity in parallel for one of our events."""
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-        f_spothero = pool.submit(_check_spothero, event_name, event_venue, event_date, our_section)
-        f_parkwhiz = pool.submit(_check_parkwhiz, event_name, event_date, event_venue, our_section)
+        f_spothero = pool.submit(_check_spothero, event_name, event_venue, event_date, our_section, city, state)
+        f_parkwhiz = pool.submit(_check_parkwhiz, event_name, event_date, event_venue, our_section, city, state)
         return {
             "spothero": f_spothero.result(),
             "parkwhiz": f_parkwhiz.result(),
         }
 
 
-def list_event_lots(event_name: str, event_date: str, event_venue: str, our_section: str = "") -> list[dict]:
+def list_event_lots(event_name: str, event_date: str, event_venue: str, our_section: str = "",
+                    city: str = "", state: str = "") -> list[dict]:
     """
     Return every competing lot (SpotHero + ParkWhiz combined) found for this
     event, each with its own spots_left/status — powers the per-event
     multi-lot breakdown in the dashboard.
     """
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-        f_spothero = pool.submit(list_spothero_lots, event_name, event_venue, event_date, our_section)
-        f_parkwhiz = pool.submit(list_parkwhiz_lots, event_name, event_date, event_venue, our_section)
+        f_spothero = pool.submit(list_spothero_lots, event_name, event_venue, event_date, our_section, city, state)
+        f_parkwhiz = pool.submit(list_parkwhiz_lots, event_name, event_date, event_venue, our_section, city, state)
         return f_spothero.result() + f_parkwhiz.result()

@@ -17,14 +17,18 @@ import threading
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from database import LystedSoldOutAlert, ScarcityCheck, get_session
+from database import LystedSoldOutAlert, PriceSpike, ScarcityCheck, get_session
 from lysted_listings import SOURCE, get_latest_upload, load_active_listings
-from teams_notify import notify_sold_out_listings
+from teams_notify import notify_price_spikes, notify_sold_out_listings
 
 logger = logging.getLogger(__name__)
 
 LYSTED_DEFAULT_INTERVAL_HOURS = 3.0   # Chibuikem: "every three hours or every six" — start at the tighter one
 PLATFORMS = ("spothero", "parkwhiz")
+
+# Same threshold the facility flow uses (facility_scan_runner), so "running
+# low" means the same thing in both Teams channels.
+LOW_INVENTORY_THRESHOLD_PERCENT = 20.0
 
 _scan_lock = threading.Lock()
 
@@ -90,6 +94,90 @@ def detect_sold_out_crossings(db, listings: List[Dict[str, Any]], scan_started: 
     return alerts
 
 
+def _is_low(check) -> bool:
+    """Is this reading 'running low' but not yet gone?"""
+    if check is None or check.scarcity_level == "sold_out":
+        return False
+    if check.percent_remaining is not None:
+        return check.percent_remaining < LOW_INVENTORY_THRESHOLD_PERCENT
+    # ParkWhiz exposes no count, only a 3-state status — "limited" is all we get.
+    return check.scarcity_level == "limited"
+
+
+def detect_low_inventory_crossings(db, listings: List[Dict[str, Any]],
+                                   scan_started: datetime) -> List[Dict[str, Any]]:
+    """
+    Which listings' backing lots have JUST started running low at source?
+
+    Crossing-based for the same reason as detect_sold_out_crossings: a lot
+    that was already low last scan is not news, and re-alerting every three
+    hours would bury the ones that just turned. Sold-out is excluded — that
+    is the other alert's job, and reporting both would double-count.
+    """
+    alerts: List[Dict[str, Any]] = []
+    for listing in listings:
+        key = listing["reachpro_listing_id"]
+        for platform in PLATFORMS:
+            current = _latest_check(db, key, platform, since=scan_started)
+            prev = _latest_check(db, key, platform, before=scan_started)
+            if not _is_low(current) or _is_low(prev):
+                continue
+            alerts.append({
+                "listing_key": key,
+                "platform": platform,
+                "lot_name": listing.get("section"),
+                "lot_address": listing.get("section"),
+                "spots_left": current.spots_left,
+                "capacity": current.capacity,
+                "percent_remaining": current.percent_remaining if current.percent_remaining is not None else 0.0,
+                "previous_percent_remaining": prev.percent_remaining if prev else None,
+                # The facility flow's "near <facility> (<cluster>)" line means
+                # nothing here; a Lysted row's context is its event and venue.
+                "context_subtitle": " · ".join(
+                    x for x in (listing.get("event_name"), listing.get("event_venue")) if x),
+                "detected_at": scan_started,
+            })
+    return alerts
+
+
+def collect_price_spikes(db, listings: List[Dict[str, Any]],
+                         scan_started: datetime) -> List[Dict[str, Any]]:
+    """
+    The spikes this scan recorded, shaped for the Teams card.
+
+    run_scan already detects and persists them (orchestrator); they were just
+    never sent anywhere for Lysted.
+    """
+    event_keys = {l["reachpro_event_id"] for l in listings}
+    if not event_keys:
+        return []
+    by_event = {}
+    for l in listings:
+        by_event.setdefault(l["reachpro_event_id"], l)
+    rows = (
+        db.query(PriceSpike)
+        .filter(PriceSpike.detected_at >= scan_started,
+                PriceSpike.reachpro_event_id.in_(event_keys))
+        .order_by(PriceSpike.percent_increase.desc())
+        .all()
+    )
+    out = []
+    for r in rows:
+        listing = by_event.get(r.reachpro_event_id, {})
+        out.append({
+            "platform": r.platform,
+            "lot_name": r.lot_name,
+            "lot_address": r.lot_address,
+            "previous_price": r.previous_price,
+            "current_price": r.current_price,
+            "percent_increase": r.percent_increase,
+            "context_subtitle": " · ".join(
+                x for x in (r.event_name or listing.get("event_name"), listing.get("event_venue")) if x),
+            "detected_at": r.detected_at,
+        })
+    return out
+
+
 def _run_locked(notify: bool, event_limit: Optional[int]) -> Dict[str, Any]:
     from orchestrator import run_scan  # lazy: orchestrator configures logging at import
 
@@ -110,6 +198,9 @@ def _run_locked(notify: bool, event_limit: Optional[int]) -> Dict[str, Any]:
 
     db = get_session()
     notified = False
+    pricing_notified = False
+    spikes: List[Dict[str, Any]] = []
+    low_inventory: List[Dict[str, Any]] = []
     try:
         alerts = detect_sold_out_crossings(db, listings, scan_started)
 
@@ -119,6 +210,18 @@ def _run_locked(notify: bool, event_limit: Optional[int]) -> Dict[str, Any]:
         for a in alerts:
             db.add(LystedSoldOutAlert(**a, notified=notified))
         db.commit()
+
+        # Second, separate card: the pricing signal. Kept apart from the
+        # sold-out message on purpose — that one is a "deactivate these now"
+        # instruction for the listing team, this one is "review these prices",
+        # and merging them would blur the call to action.
+        spikes = collect_price_spikes(db, listings, scan_started)
+        low_inventory = detect_low_inventory_crossings(db, listings, scan_started)
+        if (spikes or low_inventory) and notify:
+            pricing_notified = notify_price_spikes(
+                spikes, low_inventory_alerts=low_inventory,
+                webhook_env_var="LYSTED_TEAMS_WEBHOOK_URL",
+                subject="our Lysted listings")
     finally:
         db.close()
 
@@ -128,6 +231,9 @@ def _run_locked(notify: bool, event_limit: Optional[int]) -> Dict[str, Any]:
         "listings": len(listings),
         "sold_out_alerts_detected": len(alerts),
         "notified": notified if alerts else False,
+        "price_spikes_detected": len(spikes),
+        "low_inventory_alerts_detected": len(low_inventory),
+        "pricing_notified": pricing_notified,
     }
     logger.info("Lysted scan + sold-out detection complete: %s", out)
     return out
