@@ -139,13 +139,24 @@ def _money(value: Any) -> str:
 
 
 def _event_when(raw: Optional[str]) -> str:
-    """'2026-09-20T19:00:00' -> 'Sep 20'; raw text if it isn't ISO."""
+    """
+    '2027-07-03T16:31:00' -> 'Jul 03, 2027, 4:31 PM'; raw text if it isn't ISO.
+
+    Date and time both matter: the same act plays the same venue on several
+    dates, and the team matches an alert to a listing by them.
+    """
     if not raw:
         return ""
     try:
-        return datetime.fromisoformat(raw).strftime("%b %d")
+        dt = datetime.fromisoformat(raw)
     except ValueError:
         return raw
+    when = dt.strftime("%b %d")
+    if dt.year != datetime.now().year:
+        when += dt.strftime(", %Y")
+    if (dt.hour, dt.minute) != (0, 0):
+        when += dt.strftime(", %I:%M %p").replace(" 0", " ")
+    return when
 
 
 def _platform(name: Optional[str]) -> str:
@@ -179,10 +190,47 @@ def _low_text(a: Dict[str, Any]) -> str:
     return f"• **{_lot_label(a)}** {left} · " + " · ".join(p for p in parts if p)
 
 
+def _platform_state(detail: Dict[str, Any], platform: str) -> str:
+    """"sold out (0 of 25 left)", "available (12 left)", "not listed"."""
+    d = (detail or {}).get(platform) or {}
+    level, spots, capacity = d.get("level"), d.get("spots_left"), d.get("capacity")
+    if level in (None, "unknown"):
+        return "not checked"
+    if level == "not_found":
+        return "not listed"
+    words = {"sold_out": "sold out", "limited": "running low", "ok": "available"}
+    text = words.get(level, level)
+    if spots is not None:
+        text += f" ({spots}{f' of {capacity}' if capacity else ''} left)"
+    return text
+
+
 def _sold_out_text(a: Dict[str, Any]) -> str:
-    parts = [_event_when(a.get("event_date")), a.get("venue"), _platform(a.get("platforms"))]
-    return (f"• **{a.get('event_name') or '(unknown event)'}** — {a.get('section') or '(unknown lot)'} · "
-            + " · ".join(p for p in parts if p))
+    """
+    One listing, in the shape the listing team reads it (Leticia, 2026-09-18):
+    act, date and venue, how many passes the listing holds, and what each
+    platform says — not just the word "sold out".
+    """
+    detail = a.get("platform_detail") or {}
+    qty = a.get("quantity")
+    head = " · ".join(x for x in (a.get("event_name") or "(unknown event)",
+                                  _event_when(a.get("event_date")), a.get("venue")) if x)
+    lines = [f"• **{head}**",
+             f"Lot: {a.get('section') or '(unknown lot)'}",
+             f"Lysted listing: {qty} pass{'' if qty == 1 else 'es'}" if qty is not None else "Lysted listing: —",
+             f"SpotHero: {_platform_state(detail, 'spothero')}",
+             f"ParkWhiz: {_platform_state(detail, 'parkwhiz')}",
+             f"Passes secured: {_secured_text(a)}"]
+    return "  \n".join(lines)
+
+
+def _secured_text(a: Dict[str, Any]) -> str:
+    total, left = a.get("passes_secured"), a.get("passes_left")
+    if total is None:
+        return "none recorded"
+    if not left:
+        return f"all {total} used or cancelled"
+    return f"yes, {left} of {total} left"
 
 
 # ---------------------------------------------------------------------------
@@ -267,9 +315,18 @@ def notify_lysted_summary(stats: Dict[str, int], sold_out: List[Dict[str, Any]],
                      ("Newly sold out", len(sold_out)),
                      ("Price spikes (20%+)", len(spikes)),
                      ("Low inventory (under 20%)", len(low_inventory))])]
-    if sold_out:
-        body.append(_section("🚫 Sold out — deactivate on Lysted"))
-        body += _lines(sold_out, _sold_out_text, MAX_SOLD_OUT_LINES)
+    # Sold out at source, but passes already bought can still be sold — those
+    # listings stay up. Only the ones with nothing in hand are deactivations
+    # ("we know that we have 6 passes in our inventory. So we can still sell"
+    # — Leticia, 2026-09-18).
+    sellable = [a for a in sold_out if a.get("passes_left")]
+    deactivate = [a for a in sold_out if not a.get("passes_left")]
+    if deactivate:
+        body.append(_section("🚫 Sold out, nothing in hand — deactivate on Lysted"))
+        body += _lines(deactivate, _sold_out_text, MAX_SOLD_OUT_LINES)
+    if sellable:
+        body.append(_section("✅ Sold out at source — we can still sell our passes"))
+        body += _lines(sellable, _sold_out_text, MAX_SOLD_OUT_LINES)
     if spikes:
         body.append(_section("💲 Our lots — price changed on the platform"))
         body += _lines(sorted(spikes, key=lambda s: s["percent_increase"], reverse=True), _spike_text)

@@ -158,7 +158,18 @@ def _normalize_addr(text: str) -> str:
     return re.sub(r"[^a-z0-9]", "", t)
 
 
+# "(0.5 miles)", "(0.1 MILES AWAY)", "( 0.7 mi )" — a distance in brackets,
+# which the dash form below never sees. Both the listing sheets and the spare
+# spots workbook write it either way ("PUBLIC SQUARE GARAGE (0.5 MILES)"), and
+# leaving it in stopped the same lot matching itself across the two.
+_PAREN_DISTANCE = re.compile(r"\s*\(\s*[\d.]+\s*(?:mi\b|mile|miles)[^)]*\)", re.I)
+
+# Lysted prefixes some sections with "PARKING_" ("PARKING_29 PEARL ST. NW.- 0.7 MI").
+_SECTION_PREFIX = re.compile(r"^\s*parking[_:]\s*", re.I)
+
+
 def _extract_addr(section: str) -> str:
+    section = _SECTION_PREFIX.sub("", _PAREN_DISTANCE.sub("", section or ""))
     cleaned = re.split(r"\s*[-–]\s*(?:spot\s*#|\d+\.?\d*\s*(?:mi\b|mile|block)|\.?\d+\s*mi\b|[\d.]+\s*miles|\d+\s+only\b|[\d.]+\s*away)", section, flags=re.I)[0]
     cleaned = re.sub(r"\s*([-–].*)?$", "", cleaned.split(" -")[0]).strip() if " -" in cleaned else cleaned.strip()
     return cleaned

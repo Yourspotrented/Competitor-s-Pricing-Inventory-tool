@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from database import LystedSoldOutAlert, PriceSpike, ScarcityCheck, get_session
+import spare_spots
 from lysted_listings import SOURCE, get_latest_upload, load_active_listings
 from teams_notify import notify_lysted_summary
 
@@ -64,8 +65,12 @@ def detect_sold_out_crossings(db, listings: List[Dict[str, Any]], scan_started: 
     out is not a crossing and does not re-alert.
     """
     alerts: List[Dict[str, Any]] = []
+    spare_rows = spare_spots.load_rows()   # one SharePoint read per scan; [] if unavailable
     for listing in listings:
         key = listing["reachpro_listing_id"]
+        secured = spare_spots.passes_for(listing.get("event_date"), listing.get("section") or "",
+                                         listing.get("event_venue") or "", spare_rows)
+        secured_total, secured_left = secured if secured else (None, None)
         now_sold_out, prev_levels = [], {}
         for platform in PLATFORMS:
             current = _latest_check(db, key, platform, since=scan_started)
@@ -76,9 +81,31 @@ def detect_sold_out_crossings(db, listings: List[Dict[str, Any]], scan_started: 
         newly = [p for p in now_sold_out if prev_levels[p] != "sold_out"]
         if not newly:
             continue
+        # What each platform says right now, for the alert's per-platform
+        # lines ("SpotHero: sold out (0 left) · ParkWhiz: not listed").
+        # Leticia, 2026-09-18: the team reads an alert against their own
+        # inventory, so it has to say how many passes the listing holds and
+        # what is left on each platform, not just "sold out".
+        detail = {}
+        for platform in PLATFORMS:
+            current = _latest_check(db, key, platform, since=scan_started)
+            detail[platform] = {
+                "level": current.scarcity_level if current else None,
+                "spots_left": current.spots_left if current else None,
+                "capacity": current.capacity if current else None,
+            }
+
         alerts.append({
             "listing_key": key,
             "event_key": listing["reachpro_event_id"],
+            # Passes already bought for this listing. They decide the action:
+            # sold out at source with passes still in hand is not a
+            # deactivation, because those can still be sold ("in case the
+            # event is sold out on PW or Spothero, we know that we have 6
+            # passes in our inventory. So we can still sell" — Leticia,
+            # 2026-09-18).
+            "passes_secured": secured_total,
+            "passes_left": secured_left,
             "event_name": listing.get("event_name"),
             "event_date": listing.get("event_date"),
             "venue": listing.get("event_venue"),
@@ -89,6 +116,7 @@ def detect_sold_out_crossings(db, listings: List[Dict[str, Any]], scan_started: 
             "quantity": listing.get("quantity"),
             "list_price": listing.get("our_price"),
             "previous_levels": ", ".join(f"{p}: {prev_levels[p] or 'unchecked'}" for p in PLATFORMS),
+            "platform_detail": detail,
             "detected_at": scan_started,
         })
     return alerts
@@ -102,6 +130,27 @@ def _is_low(check) -> bool:
         return check.percent_remaining < LOW_INVENTORY_THRESHOLD_PERCENT
     # ParkWhiz exposes no count, only a 3-state status — "limited" is all we get.
     return check.scarcity_level == "limited"
+
+
+def _event_context(listing: Dict[str, Any], event_name: Optional[str] = None) -> str:
+    """
+    "Usher and Chris Brown · Oct 10, 7:01 PM · Reliant Stadium Parking".
+
+    The date is not decoration: the same act plays the same venue on several
+    dates, and an alert naming only act and venue can't be matched to a
+    listing ("we only have the event and the stadium, but we don't have the
+    date" — Leticia, 2026-09-18).
+    """
+    raw = listing.get("event_date") or ""
+    when = raw
+    try:
+        dt = datetime.fromisoformat(raw)
+        when = dt.strftime("%b %d") + ("" if (dt.hour, dt.minute) == (0, 0)
+                                       else dt.strftime(", %I:%M %p").replace(" 0", " "))
+    except ValueError:
+        pass
+    return " · ".join(x for x in (event_name or listing.get("event_name"), when,
+                                  listing.get("event_venue")) if x)
 
 
 def detect_low_inventory_crossings(db, listings: List[Dict[str, Any]],
@@ -132,9 +181,8 @@ def detect_low_inventory_crossings(db, listings: List[Dict[str, Any]],
                 "percent_remaining": current.percent_remaining if current.percent_remaining is not None else 0.0,
                 "previous_percent_remaining": prev.percent_remaining if prev else None,
                 # The facility flow's "near <facility> (<cluster>)" line means
-                # nothing here; a Lysted row's context is its event and venue.
-                "context_subtitle": " · ".join(
-                    x for x in (listing.get("event_name"), listing.get("event_venue")) if x),
+                # nothing here; a Lysted row's context is its event, date and venue.
+                "context_subtitle": _event_context(listing),
                 "detected_at": scan_started,
             })
     return alerts
@@ -176,8 +224,7 @@ def collect_price_spikes(db, listings: List[Dict[str, Any]],
             "previous_price": r.previous_price,
             "current_price": r.current_price,
             "percent_increase": r.percent_increase,
-            "context_subtitle": " · ".join(
-                x for x in (r.event_name or listing.get("event_name"), listing.get("event_venue")) if x),
+            "context_subtitle": _event_context(listing, r.event_name),
             "our_lot": True,
             "detected_at": r.detected_at,
         })
@@ -247,8 +294,12 @@ def _run_locked(notify: bool, event_limit: Optional[int]) -> Dict[str, Any]:
             notified = sent and bool(alerts)
             pricing_notified = sent and bool(spikes or low_inventory)
 
+        # The card carries more per-alert detail than the table stores
+        # (platform_detail), so keep only real columns.
+        columns = {c.name for c in LystedSoldOutAlert.__table__.columns}
         for a in alerts:
-            db.add(LystedSoldOutAlert(**a, notified=notified))
+            db.add(LystedSoldOutAlert(**{k: v for k, v in a.items() if k in columns},
+                                      notified=notified))
         db.commit()
     finally:
         db.close()

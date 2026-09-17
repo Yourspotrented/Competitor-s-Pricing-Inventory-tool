@@ -508,6 +508,8 @@ class LystedSoldOutAlert(Base):
     quantity = Column(Integer, nullable=True)
     list_price = Column(Float, nullable=True)
     previous_levels = Column(String(100), nullable=True)         # what each platform showed last scan
+    passes_secured = Column(Integer, nullable=True)              # passes bought for this listing (spare spots sheet)
+    passes_left = Column(Integer, nullable=True)                 # of those, not yet used or cancelled
     detected_at = Column(DateTime, default=utcnow, index=True)
     notified = Column(Boolean, default=False)
 
@@ -545,6 +547,8 @@ def create_tables() -> None:
     _ensure_column("scarcity_checks", "source", "VARCHAR(20)")
     _ensure_column("lot_checks", "lot_id", "VARCHAR(50)")
     _ensure_column("price_spikes", "is_our_lot", "BOOLEAN")
+    _ensure_column("lysted_sold_out_alerts", "passes_secured", "INTEGER")
+    _ensure_column("lysted_sold_out_alerts", "passes_left", "INTEGER")
 
 
 def get_db():
