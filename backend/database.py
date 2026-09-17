@@ -106,6 +106,7 @@ class PriceSpike(Base):
     previous_price = Column(Float, nullable=False)
     current_price = Column(Float, nullable=False)
     percent_increase = Column(Float, nullable=False, index=True)
+    is_our_lot = Column(Boolean, nullable=True, index=True)      # the lot behind our own listing
 
     previous_checked_at = Column(DateTime, nullable=True)
     detected_at = Column(DateTime, default=utcnow, index=True)
@@ -543,6 +544,7 @@ def create_tables() -> None:
     Base.metadata.create_all(bind=_ENGINE)
     _ensure_column("scarcity_checks", "source", "VARCHAR(20)")
     _ensure_column("lot_checks", "lot_id", "VARCHAR(50)")
+    _ensure_column("price_spikes", "is_our_lot", "BOOLEAN")
 
 
 def get_db():

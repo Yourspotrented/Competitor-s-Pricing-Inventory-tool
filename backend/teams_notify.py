@@ -167,7 +167,8 @@ def _where(item: Dict[str, Any]) -> str:
 def _spike_text(s: Dict[str, Any]) -> str:
     parts = [f"{_money(s.get('previous_price'))} → {_money(s.get('current_price'))}",
              _platform(s.get("platform")), _where(s)]
-    return f"• **{_lot_label(s)}** +{s['percent_increase']:.0f}% · " + " · ".join(p for p in parts if p)
+    ours = " (our lot)" if s.get("our_lot") else ""
+    return f"• **{_lot_label(s)}**{ours} +{s['percent_increase']:.0f}% · " + " · ".join(p for p in parts if p)
 
 
 def _low_text(a: Dict[str, Any]) -> str:
@@ -270,7 +271,7 @@ def notify_lysted_summary(stats: Dict[str, int], sold_out: List[Dict[str, Any]],
         body.append(_section("🚫 Sold out — deactivate on Lysted"))
         body += _lines(sold_out, _sold_out_text, MAX_SOLD_OUT_LINES)
     if spikes:
-        body.append(_section("💲 Biggest price jumps"))
+        body.append(_section("💲 Our lots — price changed on the platform"))
         body += _lines(sorted(spikes, key=lambda s: s["percent_increase"], reverse=True), _spike_text)
     if low_inventory:
         body.append(_section("📉 Low inventory"))

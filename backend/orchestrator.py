@@ -24,6 +24,14 @@ from checkers.scarcity_check import check_scarcity, list_event_lots
 # reading to count as a "significant increase" worth flagging.
 SPIKE_THRESHOLD_PERCENT = 20.0
 
+# Guards against readings that are a jump on paper only. A lot listed at
+# $3.69 weeks out and $21.45 on event day is early-bird vs event-day pricing,
+# not a competitor move, and at that base every few dollars reads as hundreds
+# of percent. Both were reported as real spikes until the listing team
+# spotted them.
+MAX_SPIKE_PERCENT = 300.0
+MIN_SPIKE_BASE_PRICE = 5.0
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
@@ -237,7 +245,11 @@ def run_scan(
 
                     if prev is not None and prev.price and prev.price > 0:
                         pct_change = (lot["price"] - prev.price) / prev.price * 100
-                        if pct_change >= SPIKE_THRESHOLD_PERCENT:
+                        if pct_change >= SPIKE_THRESHOLD_PERCENT and (
+                                prev.price < MIN_SPIKE_BASE_PRICE or pct_change > MAX_SPIKE_PERCENT):
+                            logger.info("Ignoring implausible spike: %s %s $%.2f -> $%.2f (+%.0f%%)",
+                                        lot["platform"], lot.get("lot_name"), prev.price, lot["price"], pct_change)
+                        elif pct_change >= SPIKE_THRESHOLD_PERCENT:
                             spike_count += 1
                             db.add(PriceSpike(
                                 reachpro_event_id=reachpro_event_id,
@@ -250,6 +262,7 @@ def run_scan(
                                 previous_price=prev.price,
                                 current_price=lot["price"],
                                 percent_increase=round(pct_change, 1),
+                                is_our_lot=bool(lot.get("is_our_lot")),
                                 previous_checked_at=prev.checked_at,
                                 detected_at=now,
                             ))

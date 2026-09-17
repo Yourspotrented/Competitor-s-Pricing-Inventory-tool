@@ -30,6 +30,13 @@ from sharepoint_upload import upload_file_to_sharepoint
 # previous reading to count as a spike worth flagging.
 SPIKE_THRESHOLD_PERCENT = 20.0
 
+# Same guards as orchestrator.MAX_SPIKE_PERCENT / MIN_SPIKE_BASE_PRICE: a jump
+# off a near-zero base, or several hundred percent, is early-bird vs event-day
+# pricing rather than a competitor move.
+MAX_SPIKE_PERCENT = 300.0
+MIN_SPIKE_BASE_PRICE = 5.0
+
+
 # A competitor lot's remaining inventory dropping below this counts as a
 # low-inventory alert — matches the call's original framing (low competitor
 # supply nearby = demand signal, opportunity to raise our own price).
@@ -87,7 +94,11 @@ def _detect_and_persist_lot_spikes(db, cluster: Dict[str, Any], platform: str,
 
         if price is not None and prev is not None and prev.price and prev.price > 0:
             pct_change = (price - prev.price) / prev.price * 100
-            if pct_change >= SPIKE_THRESHOLD_PERCENT:
+            if pct_change >= SPIKE_THRESHOLD_PERCENT and (
+                    prev.price < MIN_SPIKE_BASE_PRICE or pct_change > MAX_SPIKE_PERCENT):
+                logger.info("Ignoring implausible spike: %s %s $%.2f -> $%.2f (+%.0f%%)",
+                            platform, lot.get("lot_name"), prev.price, price, pct_change)
+            elif pct_change >= SPIKE_THRESHOLD_PERCENT:
                 spikes.append({
                     "radius_group_id": radius_group_id,
                     "cluster_label": cluster.get("cluster_label"),

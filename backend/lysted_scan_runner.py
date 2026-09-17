@@ -143,10 +143,14 @@ def detect_low_inventory_crossings(db, listings: List[Dict[str, Any]],
 def collect_price_spikes(db, listings: List[Dict[str, Any]],
                          scan_started: datetime) -> List[Dict[str, Any]]:
     """
-    The spikes this scan recorded, shaped for the Teams card.
+    The spikes this scan recorded on OUR OWN lots, shaped for the Teams card.
 
-    run_scan already detects and persists them (orchestrator); they were just
-    never sent anywhere for Lysted.
+    run_scan detects spikes on every lot it sees near an event (orchestrator).
+    Only the lot behind one of our listings is reported here: the listing team
+    reads this card against their own inventory, and a competitor two miles
+    away reads as an alert about a lot we don't have ("the alert is for 2213
+    Dorrington St, but we only have 2616 S Loop listed" — Leticia, 2026-09-17).
+    The wider competitor view is the facility and events cards' job.
     """
     event_keys = {l["reachpro_event_id"] for l in listings}
     if not event_keys:
@@ -157,6 +161,7 @@ def collect_price_spikes(db, listings: List[Dict[str, Any]],
     rows = (
         db.query(PriceSpike)
         .filter(PriceSpike.detected_at >= scan_started,
+                PriceSpike.is_our_lot.is_(True),
                 PriceSpike.reachpro_event_id.in_(event_keys))
         .order_by(PriceSpike.percent_increase.desc())
         .all()
@@ -173,6 +178,7 @@ def collect_price_spikes(db, listings: List[Dict[str, Any]],
             "percent_increase": r.percent_increase,
             "context_subtitle": " · ".join(
                 x for x in (r.event_name or listing.get("event_name"), listing.get("event_venue")) if x),
+            "our_lot": True,
             "detected_at": r.detected_at,
         })
     return out
