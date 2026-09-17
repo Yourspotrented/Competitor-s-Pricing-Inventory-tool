@@ -804,9 +804,17 @@ def _pick_our_lot(results: list, our_section: str,
         for dist, r in near:
             if dist > _SAME_LOT_METRES:
                 break
-            if dist <= _EXACT_SPOT_METRES:
-                return r
-            if len(token) >= 3 and token in _normalize(f"{_spot_addr(r)} {_spot_name(r)}"):
+            # Proximity alone is not enough, even at a few metres: geocoding
+            # "2115 E. Randol Mill Rd" lands 19 m from "602 Magic Mile St. -
+            # Lot", a different lot on a different street, and that pairing
+            # was reported as ours across 7 events. When our section names a
+            # street, that street has to appear in the lot's name or address;
+            # when it names none, position is all we have.
+            if len(token) < 3:
+                if dist <= _EXACT_SPOT_METRES:
+                    return r
+                continue
+            if token in _normalize(f"{_spot_addr(r)} {_spot_name(r)}"):
                 return r
 
     for r in results:
