@@ -1231,6 +1231,20 @@ async def lysted_upload(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+@app.get("/api/lysted/api-status")
+def lysted_api_status():
+    """Whether the Lysted API sync can run (token set, not expired). No API call."""
+    from lysted_api import api_status
+    return api_status()
+
+
+@app.post("/api/lysted/sync")
+def lysted_api_sync():
+    """Pull the inventory from Lysted's API now, instead of waiting for the next scan."""
+    from lysted_api import sync_from_api
+    return sync_from_api()
+
+
 @app.get("/api/lysted/upload/latest")
 def lysted_latest_upload(db: Session = Depends(get_db)):
     return {"upload": _upload_dict(get_latest_upload(db))}

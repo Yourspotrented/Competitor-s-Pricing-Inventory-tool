@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Optional
 
 from database import LystedSoldOutAlert, PriceSpike, ScarcityCheck, get_session
 from lysted_listings import SOURCE, get_latest_upload, load_active_listings
-from teams_notify import notify_price_spikes, notify_sold_out_listings
+from teams_notify import notify_lysted_summary
 
 logger = logging.getLogger(__name__)
 
@@ -178,14 +178,40 @@ def collect_price_spikes(db, listings: List[Dict[str, Any]],
     return out
 
 
+def scan_stats(db, listings: List[Dict[str, Any]], scan_started: datetime) -> Dict[str, int]:
+    """
+    Per-listing totals for the summary card: how many were checked, and how
+    many were found on at least one platform (any result but not_found /
+    unknown) in this scan.
+    """
+    keys = {l["reachpro_listing_id"] for l in listings}
+    found = set()
+    if keys:
+        rows = (db.query(ScarcityCheck.reachpro_listing_id, ScarcityCheck.scarcity_level)
+                .filter(ScarcityCheck.checked_at >= scan_started,
+                        ScarcityCheck.reachpro_listing_id.in_(keys))
+                .all())
+        found = {k for k, level in rows if level not in (None, "not_found", "unknown")}
+    return {"listings": len(listings), "found": len(found), "not_found": len(keys) - len(found)}
+
+
 def _run_locked(notify: bool, event_limit: Optional[int]) -> Dict[str, Any]:
     from orchestrator import run_scan  # lazy: orchestrator configures logging at import
+    from lysted_api import sync_from_api
+
+    # Refresh the inventory from Lysted's API before checking it. Whatever
+    # happens here the scan goes ahead: if the sync is skipped or fails, the
+    # latest snapshot — an earlier sync or a CSV uploaded by hand — is used.
+    api_sync = sync_from_api()
+    if api_sync.get("status") != "synced":
+        logger.info("Lysted scan using latest stored snapshot (API sync %s: %s)",
+                    api_sync.get("status"), api_sync.get("reason"))
 
     upload = get_latest_upload()
     if upload is None:
         logger.info("Lysted scan skipped — no export has been uploaded yet")
         return {"status": "skipped", "reason": "no_upload", "checked": 0,
-                "sold_out_alerts_detected": 0, "notified": False}
+                "sold_out_alerts_detected": 0, "notified": False, "api_sync": api_sync}
 
     listings = load_active_listings()
     if event_limit:
@@ -203,25 +229,21 @@ def _run_locked(notify: bool, event_limit: Optional[int]) -> Dict[str, Any]:
     low_inventory: List[Dict[str, Any]] = []
     try:
         alerts = detect_sold_out_crossings(db, listings, scan_started)
+        spikes = collect_price_spikes(db, listings, scan_started)
+        low_inventory = detect_low_inventory_crossings(db, listings, scan_started)
 
-        if alerts and notify:
-            notified = notify_sold_out_listings(alerts, webhook_env_var="LYSTED_TEAMS_WEBHOOK_URL")
+        # One summary card per scan, like the team's Daily Sold Summary:
+        # totals, then what to deactivate, then the pricing signal.
+        if notify:
+            sent = notify_lysted_summary(scan_stats(db, listings, scan_started), alerts,
+                                         spikes, low_inventory,
+                                         webhook_env_var="LYSTED_TEAMS_WEBHOOK_URL")
+            notified = sent and bool(alerts)
+            pricing_notified = sent and bool(spikes or low_inventory)
 
         for a in alerts:
             db.add(LystedSoldOutAlert(**a, notified=notified))
         db.commit()
-
-        # Second, separate card: the pricing signal. Kept apart from the
-        # sold-out message on purpose — that one is a "deactivate these now"
-        # instruction for the listing team, this one is "review these prices",
-        # and merging them would blur the call to action.
-        spikes = collect_price_spikes(db, listings, scan_started)
-        low_inventory = detect_low_inventory_crossings(db, listings, scan_started)
-        if (spikes or low_inventory) and notify:
-            pricing_notified = notify_price_spikes(
-                spikes, low_inventory_alerts=low_inventory,
-                webhook_env_var="LYSTED_TEAMS_WEBHOOK_URL",
-                subject="our Lysted listings")
     finally:
         db.close()
 
@@ -231,6 +253,7 @@ def _run_locked(notify: bool, event_limit: Optional[int]) -> Dict[str, Any]:
         "listings": len(listings),
         "sold_out_alerts_detected": len(alerts),
         "notified": notified if alerts else False,
+        "api_sync": api_sync,
         "price_spikes_detected": len(spikes),
         "low_inventory_alerts_detected": len(low_inventory),
         "pricing_notified": pricing_notified,

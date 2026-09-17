@@ -10,6 +10,8 @@ export is the deliberate interim.
 
 Two halves:
   save_upload(filename, content)   parse + persist one export (the upload)
+  save_rows(filename, rows, ...)   persist already-parsed rows — the API sync
+                                   (lysted_api.py) writes through this too
   load_active_listings()           the latest upload's live listings, in
                                    exactly the dict shape
                                    fetch_all_active_listings returns, so
@@ -98,6 +100,21 @@ def _to_int(v: Any) -> Optional[int]:
     return int(f) if f is not None else None
 
 
+def make_keys(event_name_raw: str, date_iso: str, section: str, venue: Optional[str]) -> Tuple[str, str]:
+    """
+    (listing_key, event_key) for one listing.
+
+    Shared by the CSV parser and the API sync (lysted_api.py) on purpose: the
+    sold-out and low-inventory crossing checks compare a listing's reading
+    with its previous one BY THIS KEY. If the two sources built keys
+    differently, switching from a CSV upload to an API sync would make every
+    listing look brand new and re-alert all of them at once.
+    """
+    listing_key = f"{SOURCE}:{_norm(event_name_raw)}|{date_iso}|{_norm(section)}"
+    event_key = f"{SOURCE}:{_norm(event_name_raw)}|{date_iso}|{_norm(venue)}"
+    return listing_key, event_key
+
+
 def is_live(status: Optional[str], broadcast: Optional[str]) -> bool:
     return (status or "").strip().upper() == "ACTIVE" and (broadcast or "").strip().upper() == "Y"
 
@@ -135,8 +152,7 @@ def parse_lysted_csv(content: bytes | str) -> Tuple[List[Dict[str, Any]], List[s
         if date_raw and not date_iso:
             warnings.append(f"line {i}: could not parse event date {date_raw!r} — kept raw")
 
-        listing_key = f"{SOURCE}:{_norm(event_name_raw)}|{date_iso or _norm(date_raw)}|{_norm(section)}"
-        event_key = f"{SOURCE}:{_norm(event_name_raw)}|{date_iso or _norm(date_raw)}|{_norm(g('Venue'))}"
+        listing_key, event_key = make_keys(event_name_raw, date_iso or _norm(date_raw), section, g("Venue"))
         if listing_key in seen_keys:
             warnings.append(f"line {i}: duplicate of line {seen_keys[listing_key]} "
                             f"(same event, date and section) — both kept, but they share one identity")
@@ -172,8 +188,18 @@ def parse_lysted_csv(content: bytes | str) -> Tuple[List[Dict[str, Any]], List[s
 
 
 def save_upload(filename: str, content: bytes | str) -> Dict[str, Any]:
-    """Parse and persist one export. Returns a summary for the UI."""
+    """Parse and persist one CSV export. Returns a summary for the UI."""
     rows, warnings = parse_lysted_csv(content)
+    return save_rows(filename, rows, warnings)
+
+
+def save_rows(filename: str, rows: List[Dict[str, Any]], warnings: List[str]) -> Dict[str, Any]:
+    """
+    Persist one full inventory snapshot as a new upload, which becomes the
+    active set. Rows must be in parse_lysted_csv's shape. Used by both a CSV
+    upload and an API sync, so whichever happened most recently is what the
+    next scan checks.
+    """
     create_tables()
     db = get_session()
     try:
