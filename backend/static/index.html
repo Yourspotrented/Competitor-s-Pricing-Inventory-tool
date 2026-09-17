@@ -1887,18 +1887,34 @@ function lystedPlatformCell(p) {
   return `<span class="badge ${lvl}">${lvl.replace('_', ' ')}</span>${detail}${price}`;
 }
 
+// Listings whose section names no lot ("GENERAL ADMISSION", "PARKING",
+// Row "GA"): there is nothing to look up on SpotHero or ParkWhiz, so they can
+// never be checked and are left out of the table rather than sitting there
+// permanently "unknown". The caption still counts them.
+const LYSTED_GENERIC_SECTIONS = new Set(
+  ['', 'generaladmission', 'generalparking', 'generaladmissionparking',
+   'parking', 'ga', 'gaparking', 'parkingpass', 'parkingpasses']);
+
+function lystedNamesNoLot(r) {
+  return LYSTED_GENERIC_SECTIONS.has((r.section || '').toLowerCase().replace(/[^a-z0-9]/g, ''));
+}
+
 function renderLystedCaption(upload, rows) {
   const el = $('lystedCaption');
   if (!upload) { el.textContent = ''; return; }
   const stamps = rows.map(r => r.last_checked_at).filter(Boolean).sort();
   const last = stamps.length ? stamps[stamps.length - 1] : null;
-  el.textContent = `${rows.length} live listing${rows.length === 1 ? '' : 's'} from ${upload.filename} (uploaded ${fmtDate(upload.uploaded_at)}, ${upload.skipped_count} not live and skipped)` +
+  const hidden = rows.filter(lystedNamesNoLot).length;
+  const shown = rows.length - hidden;
+  el.textContent = `${shown} live listing${shown === 1 ? '' : 's'} from ${upload.filename} (uploaded ${fmtDate(upload.uploaded_at)}, ${upload.skipped_count} not live and skipped` +
+    (hidden ? `, ${hidden} hidden — no lot named` : '') + ')' +
     (last ? ` · last checked ${fmtDate(last)}` : ' · not checked yet — click "Check Now"');
 }
 
 function renderLysted() {
   const q = $('lystedSearch').value.trim().toLowerCase();
   const rows = LYSTED_ROWS
+    .filter(r => !lystedNamesNoLot(r))
     .map(r => ({ ...r, _level: lystedRowLevel(r) }))
     .filter(r => lystedFilter === 'all' || r._level === lystedFilter)
     .filter(r => !q || `${r.event_name_raw} ${r.venue} ${r.city} ${r.state} ${r.section}`.toLowerCase().includes(q))
@@ -1906,8 +1922,9 @@ function renderLysted() {
 
   const tbody = $('lystedRows');
   tbody.innerHTML = '';
-  $('lystedEmptyState').style.display = LYSTED_ROWS.length ? 'none' : 'block';
-  if (LYSTED_ROWS.length && !rows.length) {
+  const checkable = LYSTED_ROWS.filter(r => !lystedNamesNoLot(r));
+  $('lystedEmptyState').style.display = checkable.length ? 'none' : 'block';
+  if (checkable.length && !rows.length) {
     tbody.innerHTML = `<tr><td colspan="9" class="empty" style="padding:30px;">No listings match this filter.</td></tr>`;
     return;
   }

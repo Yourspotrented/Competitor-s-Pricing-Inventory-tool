@@ -117,6 +117,19 @@ def _normalize(text: str) -> str:
     return re.sub(r"[^a-z0-9]", "", text.lower())
 
 
+# A section that names no particular lot: the pass is valid at whatever the
+# venue calls general parking. "PARKING" alone and "GA" are Lysted's other
+# spellings of it — treating them as an address made us search for a lot
+# called "parking", find nothing, and then read the nearest lot's inventory
+# as if it were ours.
+_GENERIC_SECTIONS = {"", "generaladmission", "generalparking", "generaladmissionparking",
+                     "parking", "ga", "gaparking", "parkingpass", "parkingpasses"}
+
+
+def _is_generic_section(our_section: str) -> bool:
+    return _normalize(our_section) in _GENERIC_SECTIONS
+
+
 def _normalize_addr(text: str) -> str:
     t = text.lower()
     # Compound directionals first. SpotHero's street_address spells them out
@@ -518,7 +531,7 @@ def _geocode(query: str) -> Optional[tuple[float, float]]:
 def _geocode_venue(event_venue: str, our_section: str,
                    city: str = "", state: str = "") -> Optional[tuple[float, float]]:
     clean_venue = _clean_venue(event_venue) if event_venue else ""
-    is_generic = _normalize(our_section) in ("generaladmission", "generalparking", "")
+    is_generic = _is_generic_section(our_section)
     where = ", ".join(p for p in (city, state) if p)
 
     if not is_generic and our_section:
@@ -705,6 +718,12 @@ def _spot_scarcity(r: dict) -> dict:
         pct = round(spots_left / capacity * 100, 1)
 
     if spots_left is None:
+        level = "unknown"
+    elif spots_left == 0 and not (isinstance(capacity, (int, float)) and capacity > 0):
+        # 0 of 0: SpotHero returns this for lots it has no inventory figure
+        # for, not only for full ones. Calling it sold out told the listing
+        # team to deactivate listings that were selling fine (19 of 45
+        # sold-out readings in the 2026-09-17 scan were 0/0).
         level = "unknown"
     elif spots_left == 0:
         level = "sold_out"
@@ -920,7 +939,7 @@ def _check_spothero(event_name: str, event_venue: str, event_date: str, our_sect
         return {**base, "is_available": False, "scarcity_level": "not_found",
                 "error": "no results near venue"}
 
-    is_generic = _normalize(our_section) in ("generaladmission", "generalparking", "")
+    is_generic = _is_generic_section(our_section)
 
     if not is_generic:
         our_coords = _geocode_our_lot(our_section, city, state)
@@ -975,11 +994,14 @@ def _check_spothero(event_name: str, event_venue: str, event_date: str, our_sect
         return {**base, "is_available": False, "scarcity_level": "not_found",
                 "error": "our lot not found among nearby results"}
 
-    # Generic section — report the tightest (lowest spots_left) nearby lot
-    scored = [(r, _spot_scarcity(r)) for r in results]
-    scored.sort(key=lambda pair: (pair[1]["spots_left"] if pair[1]["spots_left"] is not None else 10**9))
-    r, scarcity = scored[0]
-    return {**base, "is_available": True, "price": _spot_price(r), **scarcity}
+    # Generic section — the listing names no lot ("GENERAL ADMISSION",
+    # "PARKING", Row "GA", notes that say only "0.7 mile from venue"), so
+    # there is nothing of ours to find among these results. Reading the
+    # nearest lot's inventory instead reported competitors' lots as ours and
+    # produced 32 false sold-outs in the 2026-09-17 scan. Say we could not
+    # check it; never guess from a lot we do not sell.
+    return {**base, "is_available": None, "scarcity_level": "unknown",
+            "error": "listing names no lot — cannot identify ours"}
 
 
 def list_spothero_lots(event_name: str, event_venue: str, event_date: str, our_section: str = "",
@@ -1005,7 +1027,12 @@ def list_spothero_lots(event_name: str, event_venue: str, event_date: str, our_s
             "lot_name": _spot_name(r),
             "lot_address": _spot_addr(r),
             "price": _spot_price(r),
-            "is_our_lot": bool(our_section) and (
+            # A generic section names no lot, so nothing here is ours. Without
+            # this guard "PARKING" matched every lot whose name contains the
+            # word — "300A 12th St. SW - Crystal Parking" was flagged as our
+            # lot — and the Lysted card reports price spikes on exactly this
+            # flag, so competitors' moves would be sent as our own.
+            "is_our_lot": bool(our_section) and not _is_generic_section(our_section) and (
                 _section_matches(our_section, _spot_addr(r)) or _section_matches(our_section, _spot_name(r))
             ),
             **scarcity,
@@ -1373,7 +1400,7 @@ def _check_parkwhiz(event_name: str, event_date: str, event_venue: str, our_sect
     def _level(status: str) -> str:
         return {"available": "ok", "limited": "limited", "sold_out": "sold_out"}.get(status, "unknown")
 
-    is_generic = _normalize(our_section) in ("generaladmission", "generalparking", "")
+    is_generic = _is_generic_section(our_section)
     if not is_generic:
         our_coords = _geocode_our_lot(our_section, city, state)
         if not _anchor_is_plausible(our_coords, _geocode_venue(event_venue, "", city, state), our_section):
@@ -1397,12 +1424,9 @@ def _check_parkwhiz(event_name: str, event_date: str, event_venue: str, our_sect
         return {**base, "is_available": False, "scarcity_level": "not_found",
                 "error": "our lot not found among ParkWhiz quotes"}
 
-    # Generic section — report the tightest lot (sold_out > limited > available)
-    priority = {"sold_out": 0, "limited": 1, "available": 2, "unknown": 3}
-    lots.sort(key=lambda l: priority.get(l["status"], 3))
-    l = lots[0]
-    return {**base, "is_available": l["status"] != "sold_out", "price": l["price"],
-            "availability_status": l["status"], "scarcity_level": _level(l["status"])}
+    # Generic section — as on SpotHero: no lot named, nothing of ours to match.
+    return {**base, "is_available": None, "scarcity_level": "unknown",
+            "error": "listing names no lot — cannot identify ours"}
 
 
 def list_parkwhiz_lots(event_name: str, event_date: str, event_venue: str, our_section: str = "",
@@ -1430,7 +1454,7 @@ def list_parkwhiz_lots(event_name: str, event_date: str, event_venue: str, our_s
             "percent_remaining": None,
             "availability_status": l["status"],
             "scarcity_level": _level(l["status"]),
-            "is_our_lot": bool(our_section) and (
+            "is_our_lot": bool(our_section) and not _is_generic_section(our_section) and (
                 _section_matches(our_section, l["name"]) or _section_matches(our_section, l["address"])
             ),
         })
