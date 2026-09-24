@@ -35,10 +35,47 @@ REGION_STATE_IDS: Dict[str, List[int]] = {
 
 
 def _get_cookie() -> str:
-    cookie = os.getenv("REACHPRO_COOKIE", "").strip()
+    """
+    The session cookie to authenticate with: whatever was pasted on the
+    dashboard most recently, else REACHPRO_COOKIE from .env.
+
+    ReachPro issues no API key, so this is a browser session that goes stale
+    (every request then answers 401) and someone refreshes it by hand. The
+    dashboard paste wins because it needs no redeploy.
+    """
+    import credentials
+    cookie = credentials.current("reachpro", "REACHPRO_COOKIE")
     if not cookie:
-        raise RuntimeError("REACHPRO_COOKIE env var is not set. Add it to backend/.env")
+        raise RuntimeError("No ReachPro cookie — paste one on the dashboard, or set REACHPRO_COOKIE in backend/.env")
     return cookie
+
+
+def check_cookie(cookie: str = "", account_id: str = "") -> Dict[str, Any]:
+    """
+    Is this cookie usable? One cheap authenticated call against our own
+    account, so a bad paste is rejected at paste time rather than silently
+    breaking every scan until someone notices the 401s.
+    """
+    cookie = (cookie or "").strip() or _get_cookie()
+    account_id = account_id or _DEFAULT_ACCOUNT_ID
+    try:
+        # The catalogue count, i.e. the first call a scan makes. GetCampaigns
+        # is not a test: it answers 200 to an invalid cookie, so it would
+        # wave a bad paste straight through.
+        resp = requests.put(
+            "https://reachpro.com/api/Catalog/GetCatalogCountForListings",
+            headers=_headers(cookie, account_id),
+            json={"eventTimeFrameFilter": "Future Events", "timezoneOffsetMins": -300,
+                  "isListed": True, "stateProvinceIds": REGION_STATE_IDS["south_east"]},
+            timeout=30,
+        )
+    except requests.RequestException as exc:
+        return {"usable": False, "reason": f"could not reach ReachPro: {exc}"}
+    if resp.status_code in (401, 403):
+        return {"usable": False, "reason": "ReachPro rejected the cookie — copy a fresh one while logged in"}
+    if not resp.ok:
+        return {"usable": False, "reason": f"ReachPro answered HTTP {resp.status_code}"}
+    return {"usable": True, "reason": None}
 
 
 def _headers(cookie: str, account_id: str) -> Dict[str, str]:
@@ -119,6 +156,13 @@ def get_event_info(event_ids: List[str], cookie: str, account_id: str) -> Dict[s
     return result
 
 
+def _to_int(value: Any) -> Optional[int]:
+    try:
+        return int(float(value)) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 def get_listings_for_events_bulk(event_ids: List[str], cookie: str, account_id: str) -> Dict[str, List[Dict[str, Any]]]:
     """
     Fetch listings for multiple events in a single API call.
@@ -168,6 +212,21 @@ def get_listings_for_events_bulk(event_ids: List[str], cookie: str, account_id: 
                     "marketplace": str(mkp.get("mkp") or ""),
                     "id_on_mkp": str(mkp.get("idOnMkp") or ""),
                     "mkp_status": str(mkp.get("status") or ""),
+                    # ReachPro is the system of record for passes we have
+                    # bought (purchase orders become ticket groups), so
+                    # "inventory in hand" is read straight off the listing
+                    # rather than from a spreadsheet: unsoldQty is what is
+                    # left after sales, availQty what can still be listed.
+                    "quantity": _to_int(item.get("availQty")),
+                    "unsold_qty": _to_int(item.get("unsoldQty")),
+                    "sold_qty": _to_int(item.get("soldQty")),
+                    "ticket_count": _to_int(item.get("ticketCnt")),
+                    # The listing's own id and the actions ReachPro says it
+                    # supports ("Unbroadcast" is the deactivation) — needed by
+                    # whatever eventually writes back.
+                    "inventory_listing_id": str(item.get("id") or ""),
+                    "broadcast_status": str(item.get("brdcstStatus") or ""),
+                    "actions": list(item.get("actions") or []),
                 })
         result[str(event_id)] = listings
     return result
@@ -214,6 +273,19 @@ def get_our_listings_for_event(event_id: str, cookie: str, account_id: str) -> L
                 "marketplace": str(mkp.get("mkp") or ""),
                 "id_on_mkp": str(mkp.get("idOnMkp") or ""),
                 "mkp_status": str(mkp.get("status") or ""),
+                # Inventory in hand, straight from ReachPro: a purchase order
+                # becomes a ticket group, so unsoldQty is what we hold and
+                # have not sold yet. Already net of sales, unlike a sheet.
+                "quantity": _to_int(item.get("availQty")),
+                "unsold_qty": _to_int(item.get("unsoldQty")),
+                "sold_qty": _to_int(item.get("soldQty")),
+                "ticket_count": _to_int(item.get("ticketCnt")),
+                # For whatever eventually writes back: the inventory listing's
+                # own id, its broadcast state, and the operations ReachPro
+                # says it supports ("Unbroadcast" is the deactivation).
+                "inventory_listing_id": str(item.get("id") or ""),
+                "broadcast_status": str(item.get("brdcstStatus") or ""),
+                "actions": list(item.get("actions") or []),
             })
     return listings
 
@@ -307,6 +379,12 @@ def fetch_all_active_listings(
                     "marketplace": listing.get("marketplace", ""),
                     "id_on_mkp": listing.get("id_on_mkp", ""),
                     "mkp_status": listing.get("mkp_status", ""),
+                    "quantity": listing.get("quantity"),
+                    "unsold_qty": listing.get("unsold_qty"),
+                    "sold_qty": listing.get("sold_qty"),
+                    "inventory_listing_id": listing.get("inventory_listing_id"),
+                    "broadcast_status": listing.get("broadcast_status"),
+                    "actions": listing.get("actions") or [],
                 })
 
             # Stop early if global limit reached mid-region
@@ -317,6 +395,58 @@ def fetch_all_active_listings(
 
     logger.info("Total active listings fetched: %d", len(all_listings))
     return all_listings
+
+
+# ---------------------------------------------------------------------------
+# Writing back: taking a listing off the marketplace
+# ---------------------------------------------------------------------------
+
+def unlist_marketplace_listings(inventory_listing_id: str, cookie: str = "",
+                                account_id: str = "", dry_run: bool = True) -> Dict[str, Any]:
+    """
+    Take one inventory listing off the marketplaces it is listed on.
+
+    This is the request ReachPro's own UI sends when a listing is removed
+    (captured from the Inventory page, 2026-09-25):
+
+        POST /api/Listing/DeleteMarketplaceListings?listingId=<id>
+        body: []
+
+    The id is the INVENTORY listing id — item.id in
+    GetListingsSectionalDataForEvents, carried through the scan as
+    inventory_listing_id — not the marketplace listing id. The empty body
+    means "all of this listing's marketplace listings".
+
+    The passes themselves stay in ReachPro inventory; only the offer to sell
+    goes away. That is the deactivation the 2026-09-22 call asked for: stop
+    selling what we can no longer fulfil, keep what we already bought.
+
+    dry_run=True (the default) reports what would be sent and sends nothing.
+    Callers must pass dry_run=False deliberately, and listing_actions only
+    does so when REACHPRO_ALLOW_WRITES is set.
+    """
+    listing_id = str(inventory_listing_id or "").strip()
+    if not listing_id:
+        return {"ok": False, "dry_run": dry_run, "reason": "no inventory listing id"}
+
+    url = f"https://reachpro.com/api/Listing/DeleteMarketplaceListings?listingId={listing_id}"
+    if dry_run:
+        return {"ok": True, "dry_run": True, "would_post": url, "listing_id": listing_id}
+
+    cookie = (cookie or "").strip() or _get_cookie()
+    account_id = account_id or _DEFAULT_ACCOUNT_ID
+    try:
+        resp = requests.post(url, headers=_headers(cookie, account_id), json=[], timeout=30)
+    except requests.RequestException as exc:
+        return {"ok": False, "dry_run": False, "listing_id": listing_id, "reason": f"request failed: {exc}"}
+    if resp.status_code in (401, 403):
+        return {"ok": False, "dry_run": False, "listing_id": listing_id,
+                "reason": "ReachPro rejected the cookie — paste a fresh one"}
+    if not resp.ok:
+        return {"ok": False, "dry_run": False, "listing_id": listing_id,
+                "reason": f"HTTP {resp.status_code}: {resp.text[:160]}"}
+    logger.info("ReachPro: unlisted inventory listing %s from its marketplaces", listing_id)
+    return {"ok": True, "dry_run": False, "listing_id": listing_id, "status_code": resp.status_code}
 
 
 def fetch_campaigns(regions: Optional[List[str]] = None) -> List[Dict[str, Any]]:

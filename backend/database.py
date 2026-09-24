@@ -498,6 +498,7 @@ class LystedSoldOutAlert(Base):
     id = Column(Integer, primary_key=True)
     listing_key = Column(String(400), nullable=False, index=True)
     event_key = Column(String(400), nullable=False, index=True)
+    source = Column(String(20), nullable=True, index=True)       # "lysted" | "reachpro"
     event_name = Column(String(500), nullable=True)
     event_date = Column(String(50), nullable=True)
     venue = Column(String(500), nullable=True)
@@ -505,6 +506,7 @@ class LystedSoldOutAlert(Base):
     state = Column(String(50), nullable=True)
     section = Column(String(500), nullable=True)
     platforms = Column(String(100), nullable=True)               # "spothero" / "parkwhiz" / both, comma-joined
+    reason = Column(String(30), nullable=True, index=True)       # "sold_out" | "day_before_event"
     quantity = Column(Integer, nullable=True)
     list_price = Column(Float, nullable=True)
     previous_levels = Column(String(100), nullable=True)         # what each platform showed last scan
@@ -512,6 +514,30 @@ class LystedSoldOutAlert(Base):
     passes_left = Column(Integer, nullable=True)                 # of those, not yet used or cancelled
     detected_at = Column(DateTime, default=utcnow, index=True)
     notified = Column(Boolean, default=False)
+
+
+class PlatformCredential(Base):
+    """
+    A selling platform's short-lived login, pasted by the team.
+
+    Neither platform issues us an API key: Lysted's is a browser token that
+    expires after 24 hours, ReachPro's is a session cookie. The 2026-09-22
+    call settled on someone refreshing them by hand "for now, pending a better
+    API" — still far less work than exporting and uploading a CSV.
+
+    Kept in the database rather than .env so it survives a redeploy and can be
+    updated from the dashboard without a developer. One row per paste; the
+    newest for a source is the one in use, and the history says who pasted it
+    and when it lapsed.
+    """
+    __tablename__ = "platform_credentials"
+
+    id = Column(Integer, primary_key=True)
+    source = Column(String(20), nullable=False, index=True)   # "lysted" | "reachpro"
+    token = Column(String(8000), nullable=False)
+    expires_at = Column(DateTime, nullable=True)     # from the token itself; None for a cookie
+    saved_at = Column(DateTime, default=utcnow, index=True)
+    saved_by = Column(String(120), nullable=True)
 
 
 class GeocodeCache(Base):
@@ -549,6 +575,8 @@ def create_tables() -> None:
     _ensure_column("price_spikes", "is_our_lot", "BOOLEAN")
     _ensure_column("lysted_sold_out_alerts", "passes_secured", "INTEGER")
     _ensure_column("lysted_sold_out_alerts", "passes_left", "INTEGER")
+    _ensure_column("lysted_sold_out_alerts", "source", "VARCHAR(20)")
+    _ensure_column("lysted_sold_out_alerts", "reason", "VARCHAR(30)")
 
 
 def get_db():

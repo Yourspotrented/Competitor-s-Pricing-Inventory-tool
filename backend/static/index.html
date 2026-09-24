@@ -278,7 +278,10 @@
     <button id="eventsScanBtn" class="primary">Run Events Scan</button>
   </div>
   <div class="controls" id="lystedControls" style="display:none;">
-    <input type="file" id="lystedFile" class="file-pick" accept=".csv,text/csv" title="Lysted inventory export (.csv)" />
+    <input type="password" id="lystedToken" class="file-pick" placeholder="Paste Lysted token…"
+           title="Lysted session token — inventory is then pulled automatically until it expires (24h)" />
+    <button id="lystedTokenBtn">Save Token</button>
+    <input type="file" id="lystedFile" class="file-pick" accept=".csv,text/csv" title="Lysted inventory export (.csv) — the manual fallback" />
     <button id="lystedUploadBtn">Upload Export</button>
     <button id="lystedRefreshBtn">Refresh</button>
     <button id="lystedScanBtn" class="primary">Check Now</button>
@@ -289,6 +292,13 @@
 <div id="fdbImportStatus" class="scan-status-line" style="display:none;"></div>
 <div id="facilityScanStatus" class="scan-status-line" style="display:none;"></div>
 <div id="eventsScanStatus" class="scan-status-line" style="display:none;"></div>
+<div class="controls" id="credentialControls" style="padding: 0 28px 10px;">
+  <input type="password" id="reachproCookie" class="file-pick" placeholder="Paste ReachPro cookie…"
+         title="ReachPro session cookie — needed to read our ReachPro listings; it goes stale and is refreshed by hand" />
+  <button id="reachproCookieBtn">Save Cookie</button>
+</div>
+<div id="reachproCookieStatus" class="scan-status-line" style="display:none;"></div>
+<div id="lystedTokenStatus" class="scan-status-line" style="display:none;"></div>
 <div id="lystedUploadStatus" class="scan-status-line" style="display:none;"></div>
 <div id="lystedScanStatus" class="scan-status-line" style="display:none;"></div>
 
@@ -302,6 +312,7 @@
   <button class="view-tab-btn active" id="viewFacilitiesBtn">Facility Competitors</button>
   <button class="view-tab-btn" id="viewEventsBtn">Events Competitors</button>
   <button class="view-tab-btn" id="viewLystedBtn">Lysted Listings</button>
+  <button class="view-tab-btn" id="viewActionsBtn">Actions</button>
 </div>
 
 <div class="summary" id="summary"></div>
@@ -436,6 +447,20 @@
     </div>
     <div id="eventsLowInvEmptyState" class="empty" style="display:none;">No low-inventory crossings in the latest scan. This view shows one scan at a time, so an empty table means no competitor newly dropped below 20% remaining.</div>
   </div>
+</main>
+
+<main id="actionsView" style="display:none;">
+  <div id="actionsWriteState" class="scan-status-line"></div>
+  <table>
+    <thead>
+      <tr>
+        <th>Event</th><th>Date</th><th>Venue</th><th>Lot</th>
+        <th>Listed</th><th>In hand</th><th>Why</th><th>Action</th><th>Found</th><th></th>
+      </tr>
+    </thead>
+    <tbody id="actionRows"></tbody>
+  </table>
+  <div id="actionsEmptyState" class="empty" style="display:none;">Nothing to act on. Every listing the last scans checked can still be fulfilled.</div>
 </main>
 
 <main id="lystedView" style="display:none;">
@@ -857,6 +882,10 @@ async function refresh() {
 }
 
 const VIEW_COPY = {
+  actions: {
+    title: 'Actions',
+    sub: 'What the tool says to change on Lysted and ReachPro — deactivate what can no longer be fulfilled, leave what our own passes still cover',
+  },
   scarcity: {
     title: 'Competitor Scarcity Dashboard',
     sub: 'Events where SpotHero / ParkWhiz are running low or sold out — potential price-raise opportunities on ReachPro',
@@ -879,18 +908,20 @@ const VIEW_COPY = {
   },
 };
 
-const PORTFOLIO_VIEWS = ['facilities', 'events', 'lysted'];  // own header controls, no summary tiles
+const PORTFOLIO_VIEWS = ['facilities', 'events', 'lysted', 'actions'];  // own header controls, no summary tiles
 function switchView(view) {
   $('scarcityView').style.display = view === 'scarcity' ? '' : 'none';
   $('spikesView').style.display = view === 'spikes' ? '' : 'none';
   $('facilitiesView').style.display = view === 'facilities' ? '' : 'none';
   $('eventsView').style.display = view === 'events' ? '' : 'none';
   $('lystedView').style.display = view === 'lysted' ? '' : 'none';
+  $('actionsView').style.display = view === 'actions' ? '' : 'none';
   $('viewScarcityBtn').classList.toggle('active', view === 'scarcity');
   $('viewSpikesBtn').classList.toggle('active', view === 'spikes');
   $('viewFacilitiesBtn').classList.toggle('active', view === 'facilities');
   $('viewEventsBtn').classList.toggle('active', view === 'events');
   $('viewLystedBtn').classList.toggle('active', view === 'lysted');
+  $('viewActionsBtn').classList.toggle('active', view === 'actions');
 
   const portfolio = PORTFOLIO_VIEWS.includes(view);
   $('eventControls').style.display = portfolio ? 'none' : '';
@@ -924,6 +955,84 @@ $('viewLystedBtn').addEventListener('click', () => {
   switchView('lysted'); loadLysted(); pollLystedScanStatus();
   if (!_lystedSchedulerPollStarted) { _lystedSchedulerPollStarted = true; pollLystedSchedulerStatus(); }
 });
+
+$('viewActionsBtn').addEventListener('click', () => { switchView('actions'); loadActions(); });
+
+// The action queue. Every row is something a person would otherwise have to
+// work out by hand: is this listing dead, or do our own passes still cover it?
+// "Apply" is deliberately honest — with writes off it shows the exact request
+// it would send rather than pretending to do something.
+const ACTION_WORDS = {
+  deactivate: ['Deactivate', 'badge sold_out'],
+  keep: ['No change', 'badge ok'],
+  reduce: ['Reduce', 'badge limited'],
+};
+
+async function loadActions() {
+  const res = await fetch('/api/actions/pending');
+  const data = await res.json();
+  const rows = data.actions || [];
+  const w = data.writes || {};
+  $('actionsWriteState').textContent =
+    `Writing to Lysted: ${w.lysted ? 'ON' : 'off'} · Writing to ReachPro: ${w.reachpro ? 'ON' : 'off'}` +
+    (w.lysted || w.reachpro ? ' — Apply will change the live listing.'
+                            : ' — Apply shows the request that would be sent, and changes nothing.');
+  const tbody = $('actionRows');
+  tbody.innerHTML = '';
+  $('actionsEmptyState').style.display = rows.length ? 'none' : 'block';
+  for (const r of rows) {
+    const [word, cls] = ACTION_WORDS[r.action] || [r.action, 'badge'];
+    const why = r.reason === 'day_before_event'
+      ? 'Event is tomorrow — routine'
+      : `Sold out on ${r.platforms || '—'}`;
+    const tr = document.createElement('tr');
+    if (r.action === 'deactivate') tr.className = 'spike-row';
+    tr.innerHTML = `
+      <td>${r.event_name || '—'} <span class="muted">(${r.source})</span></td>
+      <td class="muted">${r.event_date ? fmtDate(r.event_date) : '—'}</td>
+      <td class="muted">${r.venue || '—'}</td>
+      <td>${r.section || '—'}</td>
+      <td class="price">${r.quantity ?? '—'}</td>
+      <td class="price">${r.passes_left ?? '—'}${r.passes_secured ? ` <span class="muted">of ${r.passes_secured}</span>` : ''}</td>
+      <td class="muted">${why}</td>
+      <td><span class="${cls}">${word}</span></td>
+      <td class="muted">${r.detected_at ? fmtDate(r.detected_at) : '—'}</td>
+      <td></td>`;
+    if (r.action !== 'keep') {
+      const btn = document.createElement('button');
+      btn.textContent = 'Apply';
+      btn.addEventListener('click', () => applyAction(r, btn));
+      tr.lastElementChild.appendChild(btn);
+    }
+    tbody.appendChild(tr);
+  }
+}
+
+async function applyAction(row, btn) {
+  btn.disabled = true;
+  btn.textContent = 'Working…';
+  try {
+    const res = await fetch('/api/actions/apply', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: row.id, action: row.action }),
+    });
+    const data = await res.json();
+    if (data.applied) {
+      btn.textContent = 'Done';
+    } else {
+      btn.textContent = 'Not sent';
+      btn.title = data.reason || (data.result && data.result.reason) || '';
+      const would = data.result && (data.result.would_put || data.result.would_post);
+      alert(data.applied ? 'Applied.' :
+        `Nothing was sent.\n\n${data.reason || ''}` + (would ? `\n\nIt would have sent:\n${would}` : ''));
+    }
+  } catch (e) {
+    btn.textContent = 'Failed';
+    alert(`Could not apply: ${e.message}`);
+  } finally {
+    btn.disabled = false;
+  }
+}
 
 function fmtEta(seconds) {
   if (seconds == null) return '';
@@ -1947,6 +2056,7 @@ function renderLysted() {
 }
 
 async function loadLysted() {
+  refreshLystedTokenStatus();
   const res = await fetch('/api/lysted/listings');
   const data = await res.json();
   LYSTED_ROWS = data.listings || [];
@@ -2000,6 +2110,94 @@ $('lystedListSubview').querySelectorAll('.lysted-filter-btn').forEach(btn => {
 });
 $('lystedSearch').addEventListener('input', renderLysted);
 $('lystedRefreshBtn').addEventListener('click', loadLysted);
+
+// ReachPro has no API key either: reading our listings needs a browser session
+// cookie, which goes stale and is pasted here rather than redeployed.
+async function refreshReachproCookieStatus() {
+  const el = $('reachproCookieStatus');
+  try {
+    const res = await fetch('/api/reachpro/cookie-status');
+    const s = await res.json();
+    el.style.display = 'block';
+    if (!s.configured) {
+      el.textContent = 'ReachPro cookie: none saved — our ReachPro listings cannot be read. Paste one to enable the scan.';
+    } else if (!s.usable) {
+      el.textContent = `ReachPro cookie: not working — ${s.reason || 'paste a fresh one'}.`;
+    } else {
+      const when = s.last_saved && s.last_saved.saved_at ? ` (pasted ${fmtDate(s.last_saved.saved_at)})` : '';
+      el.textContent = `ReachPro cookie: working${when}.`;
+    }
+  } catch (e) { el.style.display = 'none'; }
+}
+
+$('reachproCookieBtn').addEventListener('click', async () => {
+  const input = $('reachproCookie');
+  const status = $('reachproCookieStatus');
+  const cookie = input.value.trim();
+  if (!cookie) { alert('Paste the ReachPro cookie first.'); return; }
+  const btn = $('reachproCookieBtn');
+  btn.disabled = true;
+  status.style.display = 'block';
+  status.textContent = 'Checking the cookie with ReachPro…';
+  try {
+    const res = await fetch('/api/reachpro/cookie', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cookie }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'could not save the cookie');
+    input.value = '';
+    status.textContent = 'ReachPro cookie saved and working — scans can read our listings again.';
+  } catch (e) {
+    status.textContent = `Could not save the cookie: ${e.message}`;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+// The Lysted token is the alternative to exporting and uploading a CSV: while
+// one is valid the scan pulls the inventory itself. Lysted issues no API key
+// for this account, so it lasts 24 hours and someone pastes a fresh one daily.
+async function refreshLystedTokenStatus() {
+  const el = $('lystedTokenStatus');
+  try {
+    const res = await fetch('/api/lysted/api-status');
+    const s = await res.json();
+    el.style.display = 'block';
+    if (!s.configured) {
+      el.textContent = 'Lysted token: none saved — the tool is using the last uploaded CSV. Paste a token to pull the inventory automatically.';
+    } else if (!s.usable) {
+      el.textContent = `Lysted token: expired — ${s.reason || 'paste a fresh one'}. Until then the last uploaded CSV is used.`;
+    } else {
+      el.textContent = `Lysted token: valid for ${s.hours_left}h (until ${fmtDate(s.expires_at)}) — inventory pulls automatically before each scan.`;
+    }
+  } catch (e) { el.style.display = 'none'; }
+}
+
+$('lystedTokenBtn').addEventListener('click', async () => {
+  const input = $('lystedToken');
+  const status = $('lystedTokenStatus');
+  const token = input.value.trim();
+  if (!token) { alert('Paste the Lysted token first.'); return; }
+  const btn = $('lystedTokenBtn');
+  btn.disabled = true;
+  status.style.display = 'block';
+  status.textContent = 'Saving token…';
+  try {
+    const res = await fetch('/api/lysted/api-token', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'could not save the token');
+    input.value = '';
+    status.textContent = `Token saved — valid for ${data.hours_left}h (until ${fmtDate(data.expires_at)}). The next scan will pull the inventory itself.`;
+  } catch (e) {
+    status.textContent = `Could not save the token: ${e.message}`;
+  } finally {
+    btn.disabled = false;
+  }
+});
 
 $('lystedUploadBtn').addEventListener('click', async () => {
   const input = $('lystedFile');
@@ -2096,6 +2294,7 @@ $('lystedScanBtn').addEventListener('click', async () => {
 // Land on Facility Competitors — the Scarcity/Price Spikes views are hidden,
 // so their dashboard endpoints aren't fetched on load either.
 switchView('facilities');
+refreshReachproCookieStatus();
 loadFacilities();
 pollFacilityScanStatus();
 _facilitySchedulerPollStarted = true;

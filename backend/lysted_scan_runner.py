@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from database import LystedSoldOutAlert, PriceSpike, ScarcityCheck, get_session
+import listing_actions
 import spare_spots
 from lysted_listings import SOURCE, get_latest_upload, load_active_listings
 from teams_notify import notify_lysted_summary
@@ -40,9 +41,9 @@ def run_and_persist_lysted_scan(notify: bool = True, event_limit: Optional[int] 
 
 
 def _latest_check(db, listing_key: str, platform: str, *, since: Optional[datetime] = None,
-                  before: Optional[datetime] = None) -> Optional[ScarcityCheck]:
+                  before: Optional[datetime] = None, source: str = SOURCE) -> Optional[ScarcityCheck]:
     q = db.query(ScarcityCheck).filter(
-        ScarcityCheck.source == SOURCE,
+        ScarcityCheck.source == source,
         ScarcityCheck.reachpro_listing_id == listing_key,
         ScarcityCheck.platform == platform,
     )
@@ -53,7 +54,8 @@ def _latest_check(db, listing_key: str, platform: str, *, since: Optional[dateti
     return q.order_by(ScarcityCheck.checked_at.desc()).first()
 
 
-def detect_sold_out_crossings(db, listings: List[Dict[str, Any]], scan_started: datetime) -> List[Dict[str, Any]]:
+def detect_sold_out_crossings(db, listings: List[Dict[str, Any]], scan_started: datetime,
+                              source: str = SOURCE) -> List[Dict[str, Any]]:
     """
     Which of these listings have JUST gone sold-out at source?
 
@@ -73,8 +75,8 @@ def detect_sold_out_crossings(db, listings: List[Dict[str, Any]], scan_started: 
         secured_total, secured_left = secured if secured else (None, None)
         now_sold_out, prev_levels = [], {}
         for platform in PLATFORMS:
-            current = _latest_check(db, key, platform, since=scan_started)
-            prev = _latest_check(db, key, platform, before=scan_started)
+            current = _latest_check(db, key, platform, since=scan_started, source=source)
+            prev = _latest_check(db, key, platform, before=scan_started, source=source)
             prev_levels[platform] = prev.scarcity_level if prev else None
             if current is not None and current.scarcity_level == "sold_out":
                 now_sold_out.append(platform)
@@ -88,7 +90,7 @@ def detect_sold_out_crossings(db, listings: List[Dict[str, Any]], scan_started: 
         # what is left on each platform, not just "sold out".
         detail = {}
         for platform in PLATFORMS:
-            current = _latest_check(db, key, platform, since=scan_started)
+            current = _latest_check(db, key, platform, since=scan_started, source=source)
             detail[platform] = {
                 "level": current.scarcity_level if current else None,
                 "spots_left": current.spots_left if current else None,
@@ -112,11 +114,80 @@ def detect_sold_out_crossings(db, listings: List[Dict[str, Any]], scan_started: 
             "city": None,
             "state": listing.get("region"),
             "section": listing.get("section"),
+            "reason": "sold_out",
             "platforms": ", ".join(now_sold_out),
             "quantity": listing.get("quantity"),
             "list_price": listing.get("our_price"),
             "previous_levels": ", ".join(f"{p}: {prev_levels[p] or 'unchecked'}" for p in PLATFORMS),
             "platform_detail": detail,
+            # What to do about it, by Max's quantity rule (lysted_actions):
+            # a sell-out caps the listing at what we can still fulfil rather
+            # than always killing it.
+            "decision": listing_actions.decide(listing.get("quantity"), secured_left, detail),
+            "source": SOURCE,
+            "detected_at": scan_started,
+        })
+    return alerts
+
+
+# The listing team takes a listing down the day before its event ("If event is
+# 9/25, then we deactivate 9/24" — Leticia, 2026-09-25). That is a calendar
+# rule, not a reading of SpotHero or ParkWhiz, so it is worth flagging on its
+# own: it catches listings nobody has looked at, and it is the one
+# deactivation we could eventually do unattended without judging availability.
+DEACTIVATE_DAYS_BEFORE_EVENT = 1
+
+
+def _event_day(raw: Optional[str]):
+    try:
+        return datetime.fromisoformat((raw or "")[:19]).date()
+    except ValueError:
+        return None
+
+
+def detect_day_before_deactivations(db, listings: List[Dict[str, Any]], scan_started: datetime,
+                                    source: str = SOURCE) -> List[Dict[str, Any]]:
+    """
+    Listings whose event is close enough that the team's routine says to take
+    them down now.
+
+    Reported once per listing, not every three hours: an alert row with
+    reason="day_before_event" already present for that listing means it has
+    been raised, whether or not anyone acted on it.
+    """
+    today = scan_started.date()
+    already = {k for (k,) in db.query(LystedSoldOutAlert.listing_key)
+               .filter(LystedSoldOutAlert.reason == "day_before_event",
+                       LystedSoldOutAlert.source == source).all()}
+
+    alerts: List[Dict[str, Any]] = []
+    for listing in listings:
+        key = listing["reachpro_listing_id"]
+        event_day = _event_day(listing.get("event_date"))
+        if event_day is None or key in already:
+            continue
+        days_away = (event_day - today).days
+        if days_away < 0 or days_away > DEACTIVATE_DAYS_BEFORE_EVENT:
+            continue
+        alerts.append({
+            "listing_key": key,
+            "event_key": listing["reachpro_event_id"],
+            "source": source,
+            "reason": "day_before_event",
+            "event_name": listing.get("event_name"),
+            "event_date": listing.get("event_date"),
+            "venue": listing.get("event_venue"),
+            "city": listing.get("city"),
+            "state": listing.get("region"),
+            "section": listing.get("section"),
+            "platforms": None,
+            "quantity": listing.get("quantity"),
+            "list_price": listing.get("our_price"),
+            "previous_levels": None,
+            "days_to_event": days_away,
+            "decision": {"action": "deactivate", "target_quantity": 0,
+                         "reason": ("event is today" if days_away == 0 else "event is tomorrow")
+                                   + " — the team deactivates the day before"},
             "detected_at": scan_started,
         })
     return alerts
@@ -154,7 +225,7 @@ def _event_context(listing: Dict[str, Any], event_name: Optional[str] = None) ->
 
 
 def detect_low_inventory_crossings(db, listings: List[Dict[str, Any]],
-                                   scan_started: datetime) -> List[Dict[str, Any]]:
+                                   scan_started: datetime, source: str = SOURCE) -> List[Dict[str, Any]]:
     """
     Which listings' backing lots have JUST started running low at source?
 
@@ -167,8 +238,8 @@ def detect_low_inventory_crossings(db, listings: List[Dict[str, Any]],
     for listing in listings:
         key = listing["reachpro_listing_id"]
         for platform in PLATFORMS:
-            current = _latest_check(db, key, platform, since=scan_started)
-            prev = _latest_check(db, key, platform, before=scan_started)
+            current = _latest_check(db, key, platform, since=scan_started, source=source)
+            prev = _latest_check(db, key, platform, before=scan_started, source=source)
             if not _is_low(current) or _is_low(prev):
                 continue
             alerts.append({
@@ -189,7 +260,7 @@ def detect_low_inventory_crossings(db, listings: List[Dict[str, Any]],
 
 
 def collect_price_spikes(db, listings: List[Dict[str, Any]],
-                         scan_started: datetime) -> List[Dict[str, Any]]:
+                         scan_started: datetime, source: str = SOURCE) -> List[Dict[str, Any]]:
     """
     The spikes this scan recorded on OUR OWN lots, shaped for the Teams card.
 
@@ -231,7 +302,8 @@ def collect_price_spikes(db, listings: List[Dict[str, Any]],
     return out
 
 
-def scan_stats(db, listings: List[Dict[str, Any]], scan_started: datetime) -> Dict[str, int]:
+def scan_stats(db, listings: List[Dict[str, Any]], scan_started: datetime,
+               source: str = SOURCE) -> Dict[str, int]:
     """
     Per-listing totals for the summary card: how many were checked, and how
     many were found on at least one platform (any result but not_found /
@@ -282,6 +354,7 @@ def _run_locked(notify: bool, event_limit: Optional[int]) -> Dict[str, Any]:
     low_inventory: List[Dict[str, Any]] = []
     try:
         alerts = detect_sold_out_crossings(db, listings, scan_started)
+        alerts += detect_day_before_deactivations(db, listings, scan_started)
         spikes = collect_price_spikes(db, listings, scan_started)
         low_inventory = detect_low_inventory_crossings(db, listings, scan_started)
 

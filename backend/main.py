@@ -7,7 +7,7 @@ import secrets
 import threading
 from typing import Optional
 
-from fastapi import FastAPI, Depends, File, HTTPException, Query, Request, UploadFile
+from fastapi import Body, FastAPI, Depends, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
@@ -1238,6 +1238,23 @@ def lysted_api_status():
     return api_status()
 
 
+@app.post("/api/lysted/api-token")
+def lysted_save_api_token(payload: dict = Body(...)):
+    """
+    Save the Lysted session token pasted on the dashboard.
+
+    Lysted issues no API key for this account, so the credential is a browser
+    login token that lasts 24 hours and someone refreshes daily (2026-09-22
+    call). Saving one here replaces the CSV download-and-upload round trip:
+    every scan then pulls the inventory itself until the token lapses.
+    """
+    from lysted_api import save_token
+    try:
+        return save_token(payload.get("token") or "", payload.get("saved_by") or "")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 @app.post("/api/lysted/sync")
 def lysted_api_sync():
     """Pull the inventory from Lysted's API now, instead of waiting for the next scan."""
@@ -1365,14 +1382,178 @@ def lysted_scheduler_status():
     return get_lysted_scheduler_status()
 
 
+# --- ReachPro: the same sold-out flow against our ReachPro listings ---------
+# Chibuikem's "missing 25%" (2026-09-22). Kept separate from the Lysted
+# endpoints so either can be run, paused or broken without touching the other.
+_reachpro_scan_lock = threading.Lock()
+_reachpro_scan_status: dict = {"status": "idle"}
+
+
+def _run_reachpro_scan_background(event_limit: Optional[int]) -> None:
+    global _reachpro_scan_status
+    from reachpro_scan_runner import run_and_persist_reachpro_scan
+    with _reachpro_scan_lock:
+        _reachpro_scan_status = {"status": "running"}
+    try:
+        summary = run_and_persist_reachpro_scan(notify=True, event_limit=event_limit)
+        with _reachpro_scan_lock:
+            _reachpro_scan_status = dict(summary)
+    except Exception as exc:
+        logging.getLogger(__name__).error("ReachPro scan failed: %s", exc)
+        with _reachpro_scan_lock:
+            _reachpro_scan_status = {"status": "failed", "error": str(exc)}
+
+
+@app.get("/api/reachpro/cookie-status")
+def reachpro_cookie_status():
+    """Whether ReachPro will accept the cookie we hold. Makes one cheap call."""
+    import credentials
+    from reachpro import check_cookie
+    have = bool(credentials.current("reachpro", "REACHPRO_COOKIE"))
+    if not have:
+        return {"configured": False, "usable": False,
+                "reason": "no ReachPro cookie saved — paste one on the dashboard"}
+    status = check_cookie()
+    return {"configured": True, "source": "dashboard" if credentials.stored("reachpro") else "env",
+            "last_saved": credentials.last_saved("reachpro"), **status}
+
+
+@app.post("/api/reachpro/cookie")
+def reachpro_save_cookie(payload: dict = Body(...)):
+    """
+    Save the ReachPro session cookie pasted on the dashboard.
+
+    Validated against ReachPro before it is stored, so a bad paste fails here
+    instead of turning every scan into 401s until someone notices.
+    """
+    import credentials
+    from reachpro import check_cookie
+    cookie = (payload.get("cookie") or "").strip()
+    if not cookie:
+        raise HTTPException(status_code=400, detail="no cookie given")
+    status = check_cookie(cookie)
+    if not status["usable"]:
+        raise HTTPException(status_code=400, detail=status["reason"])
+    return {**credentials.save("reachpro", cookie, None, payload.get("saved_by") or ""), "usable": True}
+
+
+@app.post("/api/reachpro/scan")
+def trigger_reachpro_scan(event_limit: Optional[int] = Query(None)):
+    """Check our ReachPro listings against the buying platforms now (background)."""
+    current = get_current_run()
+    if current and current.get("status") == "running":
+        return {"status": "already_running", "run": current}
+    with _reachpro_scan_lock:
+        if _reachpro_scan_status.get("status") == "running":
+            return {"status": "already_running", "run": _reachpro_scan_status}
+    threading.Thread(target=_run_reachpro_scan_background,
+                     kwargs={"event_limit": event_limit}, daemon=True).start()
+    return {"status": "started"}
+
+
+@app.get("/api/reachpro/scan/status")
+def reachpro_scan_status():
+    with _reachpro_scan_lock:
+        status = dict(_reachpro_scan_status)
+    if status.get("status") == "running":
+        current = get_current_run() or {}
+        status.update({k: current.get(k) for k in ("checked", "total_listings", "eta_seconds")})
+    return status
+
+
+# --- The action queue: what the tool would change, and doing it -------------
+# Max Lawrence (2026-09-22): deactivation "needs to happen automatically".
+# Until both platforms grant write access this is the bridge — the team works
+# from the same list the writer will consume, so nothing is invented twice.
+
+# How far back a queued action is still worth acting on. Older rows are
+# history: the listing has moved on, and a scan would raise it again if it
+# still mattered.
+ACTION_QUEUE_DAYS = 7
+
+
+@app.get("/api/actions/pending")
+def pending_actions(limit: int = Query(100, le=500), days: int = Query(ACTION_QUEUE_DAYS, le=90),
+                    db: Session = Depends(get_db)):
+    """
+    Listings the recent scans say to act on, newest first, with the reason.
+
+    Only rows this code raised are shown: alerts recorded before the
+    2026-09-17 fixes carry no reason and no inventory figures, and many of
+    them are the GENERAL ADMISSION false positives that fix removed. Showing
+    them here would put "deactivate" next to listings that were selling fine.
+    """
+    import listing_actions
+    from datetime import datetime, timedelta, timezone
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+    rows = (db.query(LystedSoldOutAlert)
+            .filter(LystedSoldOutAlert.detected_at >= since,
+                    LystedSoldOutAlert.reason.isnot(None))
+            .order_by(LystedSoldOutAlert.detected_at.desc())
+            .limit(limit).all())
+    out = []
+    for r in rows:
+        in_hand = r.passes_left
+        # Recomputed rather than stored: wording can change without a
+        # migration, and a stale row should never be actionable.
+        if r.reason == "day_before_event":
+            action = "deactivate"
+        elif in_hand:
+            action = "keep"            # our own passes still cover it
+        elif in_hand == 0:
+            action = "deactivate"      # nothing left to fulfil it
+        else:
+            action = "review"          # inventory unknown — a person decides
+        out.append({
+            "id": r.id, "source": r.source or "lysted", "reason": r.reason or "sold_out",
+            "event_name": r.event_name, "event_date": r.event_date, "venue": r.venue,
+            "section": r.section, "quantity": r.quantity, "list_price": r.list_price,
+            "passes_secured": r.passes_secured, "passes_left": in_hand,
+            "platforms": r.platforms, "action": action,
+            "detected_at": r.detected_at.isoformat() if r.detected_at else None,
+            "notified": r.notified,
+        })
+    return {
+        "writes": {"lysted": listing_actions.writes_enabled("lysted"),
+                   "reachpro": listing_actions.writes_enabled("reachpro")},
+        "actions": out,
+    }
+
+
+@app.post("/api/actions/apply")
+def apply_pending_action(payload: dict = Body(...), db: Session = Depends(get_db)):
+    """
+    Carry out one queued action, or show what would be sent.
+
+    Refuses to send anything unless that platform's *_ALLOW_WRITES is on; with
+    it off this returns the exact request it would make, which is what the
+    team reviews before the switch is thrown.
+    """
+    import listing_actions
+    alert_id = payload.get("id")
+    row = db.query(LystedSoldOutAlert).filter(LystedSoldOutAlert.id == alert_id).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="no such queued action")
+    source = row.source or "lysted"
+    listing = {"reachpro_listing_id": row.listing_key,
+               "inventory_listing_id": payload.get("inventory_listing_id") or "",
+               "lysted_listing_id": payload.get("lysted_listing_id") or ""}
+    decision = {"action": payload.get("action") or "deactivate", "target_quantity": 0,
+                "reason": row.reason or "sold_out"}
+    return listing_actions.apply_action(listing, decision, source)
+
+
 @app.get("/api/lysted/sold-out-alerts")
 def lysted_sold_out_alerts(
     latest_run_only: bool = Query(False),
     limit: int = Query(200, le=1000),
+    source: Optional[str] = Query(None, description="lysted | reachpro; both when omitted"),
     db: Session = Depends(get_db),
 ):
     """Listings that went sold-out at source, most recent first. See facility_price_spikes for latest_run_only."""
     q = db.query(LystedSoldOutAlert)
+    if source:
+        q = q.filter(LystedSoldOutAlert.source == source)
     if latest_run_only:
         q = _only_latest_run(q, LystedSoldOutAlert)
     rows = q.order_by(LystedSoldOutAlert.detected_at.desc()).limit(limit).all()
@@ -1390,6 +1571,9 @@ def lysted_sold_out_alerts(
             "quantity": r.quantity,
             "list_price": r.list_price,
             "previous_levels": r.previous_levels,
+            "source": r.source or "lysted",
+            "passes_secured": r.passes_secured,
+            "passes_left": r.passes_left,
             "detected_at": r.detected_at.isoformat() if r.detected_at else None,
             "notified": r.notified,
         }

@@ -64,7 +64,44 @@ class LystedApiUnavailable(Exception):
 
 
 def _token() -> str:
-    return os.getenv(TOKEN_ENV, "").strip()
+    """
+    The token to use: whatever was pasted most recently, else the env var.
+
+    The dashboard paste wins because it is the one someone can refresh daily
+    without a redeploy; LYSTED_API_TOKEN stays supported for local testing and
+    for the day Lysted issues a real key.
+    """
+    stored = stored_token()
+    return stored or os.getenv(TOKEN_ENV, "").strip()
+
+
+def stored_token() -> str:
+    import credentials
+    return credentials.stored("lysted")
+
+
+def save_token(token: str, saved_by: str = "") -> Dict[str, Any]:
+    """
+    Store a freshly pasted token. Rejects anything that isn't a JWT we can
+    read an expiry out of, so a mistyped paste fails here rather than silently
+    breaking every sync for a day.
+    """
+    import credentials
+
+    token = (token or "").strip()
+    if token.lower().startswith("bearer "):
+        token = token[7:].strip()
+    if not token:
+        raise ValueError("no token given")
+    expires = token_expires_at(token)
+    if expires is None:
+        raise ValueError("that doesn't look like a Lysted token — no expiry could be read from it")
+    if expires <= datetime.now(timezone.utc):
+        raise ValueError(f"that token expired at {expires.strftime('%Y-%m-%d %H:%M UTC')} — copy a fresh one")
+
+    saved = credentials.save("lysted", token, expires.replace(tzinfo=None), saved_by)
+    return {**saved, "expires_at": expires.isoformat(),
+            "hours_left": round((expires - datetime.now(timezone.utc)).total_seconds() / 3600, 1)}
 
 
 def token_expires_at(token: str) -> Optional[datetime]:
@@ -85,14 +122,18 @@ def api_status() -> Dict[str, Any]:
     """Whether a sync could run right now, without calling the API."""
     token = _token()
     if not token:
-        return {"configured": False, "usable": False, "reason": f"{TOKEN_ENV} is not set"}
+        return {"configured": False, "usable": False, "source": None,
+                "reason": "no Lysted token saved — paste one on the dashboard"}
     exp = token_expires_at(token)
-    expired = exp is not None and exp <= datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc)
+    expired = exp is not None and exp <= now
     return {
         "configured": True,
         "usable": not expired,
+        "source": "dashboard" if stored_token() else "env",
         "expires_at": exp.isoformat() if exp else None,
-        "reason": "token expired — paste a fresh one or ask Lysted for an API key" if expired else None,
+        "hours_left": round((exp - now).total_seconds() / 3600, 1) if exp and not expired else 0,
+        "reason": "token expired — paste a fresh one on the dashboard" if expired else None,
     }
 
 
@@ -261,6 +302,61 @@ def fetch_export_csv() -> bytes:
     if not resp.ok or not resp.content:
         raise LystedApiUnavailable(f"downloading export {key}: HTTP {resp.status_code}")
     return resp.content
+
+
+# ---------------------------------------------------------------------------
+# Writing back: taking a listing off sale
+# ---------------------------------------------------------------------------
+
+def set_broadcast(listing_id: str, broadcast: bool = False, dry_run: bool = True) -> Dict[str, Any]:
+    """
+    Turn a Lysted listing's broadcast on or off — their word for deactivating.
+
+    This is the request the Lysted web app sends when the "Not Broadcasting"
+    switch is flipped and Save Changes is pressed (captured 2026-09-25):
+
+        PUT https://api.lysted.com/api/listings/<listing id>
+        body: {"broadcast": false}
+
+    The response comes back with "broadcast": false and "status": "READY",
+    which is exactly the pair the inventory export calls not-live — the same
+    test lysted_listings.is_live applies when deciding what to scan. So a
+    listing deactivated this way disappears from our own active set on the
+    next sync, with no special handling.
+
+    Quantity is deliberately not touched: Leticia (2026-09-25) says a
+    listing's quantity cannot be changed once created. The response does carry
+    a separate "shownQuantity" field, which may be how fewer passes are
+    offered than held, but nobody has confirmed that and guessing at it on
+    live inventory is not worth the risk.
+
+    dry_run=True (the default) reports what would be sent and sends nothing.
+    """
+    listing_id = str(listing_id or "").strip()
+    if not listing_id:
+        return {"ok": False, "dry_run": dry_run, "reason": "no Lysted listing id"}
+
+    url = f"{API_BASE}/listings/{listing_id}"
+    payload = {"broadcast": bool(broadcast)}
+    if dry_run:
+        return {"ok": True, "dry_run": True, "would_put": url, "body": payload,
+                "listing_id": listing_id}
+
+    status = api_status()
+    if not status["usable"]:
+        return {"ok": False, "dry_run": False, "listing_id": listing_id, "reason": status["reason"]}
+    try:
+        resp = requests.put(url, json=payload, headers=_headers(_token()), timeout=30)
+    except requests.RequestException as exc:
+        return {"ok": False, "dry_run": False, "listing_id": listing_id, "reason": f"request failed: {exc}"}
+    if resp.status_code in (401, 403):
+        return {"ok": False, "dry_run": False, "listing_id": listing_id,
+                "reason": f"Lysted refused it (HTTP {resp.status_code}) — token expired, or no write permission"}
+    if not resp.ok:
+        return {"ok": False, "dry_run": False, "listing_id": listing_id,
+                "reason": f"HTTP {resp.status_code}: {resp.text[:160]}"}
+    logger.info("Lysted: listing %s broadcast set to %s", listing_id, broadcast)
+    return {"ok": True, "dry_run": False, "listing_id": listing_id, "broadcast": broadcast}
 
 
 def sync_from_api() -> Dict[str, Any]:

@@ -221,7 +221,21 @@ def _sold_out_text(a: Dict[str, Any]) -> str:
              f"SpotHero: {_platform_state(detail, 'spothero')}",
              f"ParkWhiz: {_platform_state(detail, 'parkwhiz')}",
              f"Passes secured: {_secured_text(a)}"]
+    decision = a.get("decision")
+    if decision:
+        lines.append(f"**Action: {_action_text(decision, qty)}**")
     return "  \n".join(lines)
+
+
+def _action_text(decision: Dict[str, Any], quantity: Optional[int]) -> str:
+    """"reduce 15 → 10 passes" / "deactivate" / "no change" — the instruction."""
+    action = decision.get("action")
+    target = decision.get("target_quantity")
+    if action == "deactivate":
+        return "deactivate — nothing left to fulfil it"
+    if action == "reduce":
+        return f"reduce {quantity} → {target} passes ({decision.get('reason', '')})"
+    return "no change — we can still fulfil this listing"
 
 
 def _secured_text(a: Dict[str, Any]) -> str:
@@ -287,9 +301,21 @@ def notify_price_spikes(spikes: List[Dict[str, Any]], low_inventory_alerts: List
 # Lysted summary: sold out at source + pricing, one card per scan
 # ---------------------------------------------------------------------------
 
+def _day_before_text(a: Dict[str, Any]) -> str:
+    """The routine day-before line: no platform state, just what to take down."""
+    qty = a.get("quantity")
+    head = " · ".join(x for x in (a.get("event_name") or "(unknown event)",
+                                  _event_when(a.get("event_date")), a.get("venue")) if x)
+    return "  \n".join([f"• **{head}**",
+                        f"Lot: {a.get('section') or '(unknown lot)'}",
+                        f"Lysted listing: {qty} pass{'' if qty == 1 else 'es'}" if qty is not None
+                        else "Lysted listing: —"])
+
+
 def notify_lysted_summary(stats: Dict[str, int], sold_out: List[Dict[str, Any]],
                           spikes: List[Dict[str, Any]], low_inventory: List[Dict[str, Any]],
-                          webhook_env_var: str = "LYSTED_TEAMS_WEBHOOK_URL") -> bool:
+                          webhook_env_var: str = "LYSTED_TEAMS_WEBHOOK_URL",
+                          title: str = "📊 Lysted Scan Summary") -> bool:
     """
     One summary card for a Lysted scan.
 
@@ -309,24 +335,42 @@ def notify_lysted_summary(stats: Dict[str, int], sold_out: List[Dict[str, Any]],
                     webhook_env_var, len(sold_out), len(spikes), len(low_inventory))
         return False
 
-    body = [_header("📊 Lysted Scan Summary"),
-            _totals([("Listings checked", stats.get("listings", 0)),
-                     ("Found on SpotHero / ParkWhiz", stats.get("found", 0)),
-                     ("Newly sold out", len(sold_out)),
-                     ("Price spikes (20%+)", len(spikes)),
-                     ("Low inventory (under 20%)", len(low_inventory))])]
     # Sold out at source, but passes already bought can still be sold — those
     # listings stay up. Only the ones with nothing in hand are deactivations
     # ("we know that we have 6 passes in our inventory. So we can still sell"
     # — Leticia, 2026-09-18).
-    sellable = [a for a in sold_out if a.get("passes_left")]
-    deactivate = [a for a in sold_out if not a.get("passes_left")]
+    def _act(a):
+        return (a.get("decision") or {}).get("action") or ("keep" if a.get("passes_left") else "deactivate")
+
+    # The day-before rule is routine housekeeping, not a sell-out, and mixing
+    # the two would bury the ones that need a judgement call — in the counts
+    # as much as in the list.
+    day_before = [a for a in sold_out if a.get("reason") == "day_before_event"]
+    sold_out = [a for a in sold_out if a.get("reason") != "day_before_event"]
+    deactivate = [a for a in sold_out if _act(a) == "deactivate"]
+
+    totals = [("Listings checked", stats.get("listings", 0)),
+              ("Found on SpotHero / ParkWhiz", stats.get("found", 0)),
+              ("Newly sold out", len(sold_out))]
+    if day_before:
+        totals.append(("Deactivate — event tomorrow", len(day_before)))
+    totals += [("Price spikes (20%+)", len(spikes)),
+               ("Low inventory (under 20%)", len(low_inventory))]
+    body = [_header(title), _totals(totals)]
+    reduce_to = [a for a in sold_out if _act(a) == "reduce"]
+    keep = [a for a in sold_out if _act(a) == "keep"]
     if deactivate:
-        body.append(_section("🚫 Sold out, nothing in hand — deactivate on Lysted"))
+        body.append(_section("🚫 Deactivate — nothing left to fulfil these"))
         body += _lines(deactivate, _sold_out_text, MAX_SOLD_OUT_LINES)
-    if sellable:
-        body.append(_section("✅ Sold out at source — we can still sell our passes"))
-        body += _lines(sellable, _sold_out_text, MAX_SOLD_OUT_LINES)
+    if reduce_to:
+        body.append(_section("✂️ Reduce the listed quantity to what we can fulfil"))
+        body += _lines(reduce_to, _sold_out_text, MAX_SOLD_OUT_LINES)
+    if keep:
+        body.append(_section("✅ Sold out at source — our passes still cover the listing"))
+        body += _lines(keep, _sold_out_text, MAX_SOLD_OUT_LINES)
+    if day_before:
+        body.append(_section("🗓️ Event is tomorrow — deactivate as usual"))
+        body += _lines(day_before, _day_before_text, MAX_SOLD_OUT_LINES)
     if spikes:
         body.append(_section("💲 Our lots — price changed on the platform"))
         body += _lines(sorted(spikes, key=lambda s: s["percent_increase"], reverse=True), _spike_text)
