@@ -137,6 +137,12 @@ def detect_sold_out_crossings(db, listings: List[Dict[str, Any]], scan_started: 
 # deactivation we could eventually do unattended without judging availability.
 DEACTIVATE_DAYS_BEFORE_EVENT = 1
 
+# Off unless asked for.
+# but nobody has asked the tool to act on it, and a card listing every event
+# happening tomorrow is noise until they do. Set LYSTED_DAY_BEFORE_ALERTS=1.
+def _day_before_enabled() -> bool:
+    return os.getenv("LYSTED_DAY_BEFORE_ALERTS", "").strip().lower() in ("1", "true", "yes")
+
 
 def _event_day(raw: Optional[str]):
     try:
@@ -155,6 +161,8 @@ def detect_day_before_deactivations(db, listings: List[Dict[str, Any]], scan_sta
     reason="day_before_event" already present for that listing means it has
     been raised, whether or not anyone acted on it.
     """
+    if not _day_before_enabled():
+        return []
     today = scan_started.date()
     already = {k for (k,) in db.query(LystedSoldOutAlert.listing_key)
                .filter(LystedSoldOutAlert.reason == "day_before_event",
