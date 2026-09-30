@@ -484,7 +484,7 @@
       <div class="tbl-shell">
         <table>
           <thead>
-            <tr><th>Event</th><th>Date</th><th>Venue</th><th title="The parking lot behind the listing — Lysted's Section column">Lot</th><th>Qty</th><th>List</th><th title="Availability of that lot on SpotHero for the event window">SpotHero</th><th title="Availability of that lot on ParkWhiz for the event window">ParkWhiz</th><th>Checked</th></tr>
+            <tr><th>Event</th><th>Date</th><th>Venue</th><th title="The parking lot behind the listing — Lysted's Section column">Lot</th><th>Qty</th><th>List</th><th title="Availability of that lot on SpotHero for the event window">SpotHero</th><th title="Availability of that lot on ParkWhiz for the event window">ParkWhiz</th><th title="Availability of that lot on Way.com for the event window — Way publishes no spots-left count, so it reads available or sold out">Way.com</th><th>Checked</th></tr>
           </thead>
           <tbody id="lystedRows"></tbody>
         </table>
@@ -1978,8 +1978,16 @@ let lystedFilter = 'all';
 const LYSTED_RANK = { sold_out: 0, limited: 1, ok: 2, unknown: 3, not_found: 4, unchecked: 5 };
 
 // Worst reading across the two platforms — sold out anywhere is what matters.
+// A listing's row level is its WORST reading across every platform, so sold
+// out anywhere sorts to the top (LYSTED_RANK) and is never hidden behind an
+// "ok" from another platform. Way.com counts here too: it publishes no
+// spots-left count, but a sell-out it reports is as real as SpotHero's.
 function lystedRowLevel(r) {
-  const levels = [r.spothero && r.spothero.scarcity_level, r.parkwhiz && r.parkwhiz.scarcity_level].filter(Boolean);
+  const levels = [
+    r.spothero && r.spothero.scarcity_level,
+    r.parkwhiz && r.parkwhiz.scarcity_level,
+    r.way && r.way.scarcity_level,
+  ].filter(Boolean);
   if (!levels.length) return 'unchecked';
   for (const lvl of ['sold_out', 'limited', 'ok', 'not_found']) if (levels.includes(lvl)) return lvl;
   return 'unknown';
@@ -2034,7 +2042,7 @@ function renderLysted() {
   const checkable = LYSTED_ROWS.filter(r => !lystedNamesNoLot(r));
   $('lystedEmptyState').style.display = checkable.length ? 'none' : 'block';
   if (checkable.length && !rows.length) {
-    tbody.innerHTML = `<tr><td colspan="9" class="empty" style="padding:30px;">No listings match this filter.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="10" class="empty" style="padding:30px;">No listings match this filter.</td></tr>`;
     return;
   }
   for (const r of rows) {
@@ -2049,6 +2057,7 @@ function renderLysted() {
       <td class="price">${fmtMoney(r.list_price)}</td>
       <td>${lystedPlatformCell(r.spothero)}</td>
       <td>${lystedPlatformCell(r.parkwhiz)}</td>
+      <td>${lystedPlatformCell(r.way)}</td>
       <td class="muted">${r.last_checked_at ? fmtDate(r.last_checked_at) : '—'}</td>
     `;
     tbody.appendChild(tr);

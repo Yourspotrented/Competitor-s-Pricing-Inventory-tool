@@ -1486,15 +1486,98 @@ def list_parkwhiz_lots(event_name: str, event_date: str, event_venue: str, our_s
 # Main entry point
 # ---------------------------------------------------------------------------
 
+def _check_way(event_name: str, event_date: str, event_venue: str, our_section: str,
+               city: str = "", state: str = "") -> dict:
+    """
+    Is our lot still on sale at Way.com?
+
+    Way publishes no spots-left count, so the answer is only "on sale" or
+    "sold out" — like ParkWhiz, it can confirm a sell-out but never say how
+    much is left. It does give every lot's own coordinates, so our lot is
+    matched the same way as on SpotHero: position first, text second.
+    """
+    from checkers import way_check
+
+    base = {"platform": "way", "spots_left": None, "capacity": None, "percent_remaining": None}
+    if _is_generic_section(our_section):
+        return {**base, "is_available": None, "scarcity_level": "unknown",
+                "error": "listing names no lot — cannot identify ours"}
+
+    venue_coords = _geocode_venue(event_venue, our_section, city, state)
+    our_coords = _geocode_our_lot(our_section, city, state)
+    if not _anchor_is_plausible(our_coords, venue_coords, our_section):
+        our_coords = None
+    # Centre on the venue, not on our lot: Way returns everything within about
+    # a mile, our lot included, and one search per event is what keeps us
+    # inside their crawl-delay. Our lot is then picked out by position.
+    centre = venue_coords or our_coords
+    if centre is None:
+        return {**base, "is_available": None, "scarcity_level": "unknown",
+                "error": "could not place the venue or our lot on a map"}
+
+    lots, err = way_check.search_lots_cached(centre[0], centre[1], event_date)
+    if err:
+        return {**base, "is_available": None, "scarcity_level": "unknown", "error": err}
+    if not lots:
+        return {**base, "is_available": False, "scarcity_level": "not_found",
+                "error": "no Way.com lots near this venue/time"}
+
+    ours = _pick_our_way_lot(lots, our_section, our_coords)
+    if ours is None:
+        return {**base, "is_available": False, "scarcity_level": "not_found",
+                "error": "our lot not found among Way.com results"}
+    return {**base, "is_available": ours["scarcity_level"] != "sold_out",
+            "price": ours.get("price"),
+            "availability_status": ours.get("availability_status"),
+            "scarcity_level": ours["scarcity_level"]}
+
+
+def _pick_our_way_lot(lots: list, our_section: str,
+                      our_coords: Optional[tuple[float, float]]) -> Optional[dict]:
+    """
+    Which Way.com lot is ours? Same rule as SpotHero: a street named in our
+    section must appear in the lot's name or address, whatever the distance,
+    so a neighbouring lot a few metres away is never mistaken for ours.
+    """
+    token = _street_token(our_section)
+    if our_coords:
+        near = sorted(
+            ((_haversine_m(our_coords, (l["lat"], l["lon"])), l)
+             for l in lots if l.get("lat") is not None and l.get("lon") is not None),
+            key=lambda pair: pair[0],
+        )
+        for dist, lot in near:
+            if dist > _SAME_LOT_METRES:
+                break
+            text = _normalize(f"{lot.get('lot_address')} {lot.get('lot_name')}")
+            if len(token) < 3:
+                if dist <= _EXACT_SPOT_METRES:
+                    return lot
+                continue
+            if token in text:
+                return lot
+
+    for lot in lots:
+        if _section_matches(our_section, lot.get("lot_address")) or \
+                _section_matches(our_section, lot.get("lot_name")):
+            return lot
+    for lot in lots:
+        if _lot_name_matches(our_section, lot.get("lot_name") or ""):
+            return lot
+    return None
+
+
 def check_scarcity(event_name: str, event_date: str, event_venue: str, our_section: str,
                    city: str = "", state: str = "") -> dict:
-    """Check SpotHero and ParkWhiz scarcity in parallel for one of our events."""
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+    """Check SpotHero, ParkWhiz and Way.com scarcity in parallel for one of our events."""
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
         f_spothero = pool.submit(_check_spothero, event_name, event_venue, event_date, our_section, city, state)
         f_parkwhiz = pool.submit(_check_parkwhiz, event_name, event_date, event_venue, our_section, city, state)
+        f_way = pool.submit(_check_way, event_name, event_date, event_venue, our_section, city, state)
         return {
             "spothero": f_spothero.result(),
             "parkwhiz": f_parkwhiz.result(),
+            "way": f_way.result(),
         }
 
 

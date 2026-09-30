@@ -1325,7 +1325,8 @@ def lysted_listings(db: Session = Depends(get_db)):
     for r in rows:
         sh = by_key.get((r.listing_key, "spothero"))
         pw = by_key.get((r.listing_key, "parkwhiz"))
-        stamps = [c.checked_at for c in (sh, pw) if c is not None and c.checked_at]
+        way = by_key.get((r.listing_key, "way"))
+        stamps = [c.checked_at for c in (sh, pw, way) if c is not None and c.checked_at]
         out.append({
             "listing_key": r.listing_key,
             "event_key": r.event_key,
@@ -1345,6 +1346,7 @@ def lysted_listings(db: Session = Depends(get_db)):
             "broadcast": r.broadcast,
             "spothero": _reading(sh),
             "parkwhiz": _reading(pw),
+            "way": _reading(way),
             "last_checked_at": max(stamps).isoformat() if stamps else None,
         })
     return {"upload": _upload_dict(up), "listings": out}

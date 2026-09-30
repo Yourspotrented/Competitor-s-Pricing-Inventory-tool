@@ -257,7 +257,11 @@ def detect_low_inventory_crossings(db, listings: List[Dict[str, Any]],
                 "lot_address": listing.get("section"),
                 "spots_left": current.spots_left,
                 "capacity": current.capacity,
-                "percent_remaining": current.percent_remaining if current.percent_remaining is not None else 0.0,
+                # None, not 0.0: ParkWhiz and Way publish no count, and
+                # writing 0% made "we don't know" read as "nothing left" on
+                # the card — four ParkWhiz lots showed "0% left" while simply
+                # being marked limited.
+                "percent_remaining": current.percent_remaining,
                 "previous_percent_remaining": prev.percent_remaining if prev else None,
                 # The facility flow's "near <facility> (<cluster>)" line means
                 # nothing here; a Lysted row's context is its event, date and venue.

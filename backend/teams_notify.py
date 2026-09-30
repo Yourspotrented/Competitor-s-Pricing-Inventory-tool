@@ -183,7 +183,10 @@ def _spike_text(s: Dict[str, Any]) -> str:
 
 
 def _low_text(a: Dict[str, Any]) -> str:
-    left = f"{a['percent_remaining']:.0f}% left"
+    pct = a.get("percent_remaining")
+    # A platform that publishes no count says "running low" and nothing more;
+    # inventing a percentage for it would be inventing information.
+    left = f"{pct:.0f}% left" if isinstance(pct, (int, float)) else "running low"
     if a.get("spots_left") is not None and a.get("capacity") is not None:
         left += f" ({a['spots_left']}/{a['capacity']})"
     parts = [_platform(a.get("platform")), _where(a)]
@@ -397,7 +400,7 @@ def notify_lysted_summary(stats: Dict[str, int], sold_out: List[Dict[str, Any]],
     deactivate = [a for a in sold_out if _act(a) == "deactivate"]
 
     totals = [("Listings checked", stats.get("listings", 0)),
-              ("Found on SpotHero / ParkWhiz", stats.get("found", 0)),
+              ("Found on a buying platform", stats.get("found", 0)),
               ("Newly sold out", len(sold_out))]
     if day_before:
         totals.append(("Deactivate — event tomorrow", len(day_before)))
