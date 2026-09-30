@@ -38,9 +38,15 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+
+# Never take down more than this in one scan, per platform. A detection bug,
+# a bad token, or a platform answering oddly should cost a handful of listings
+# and a question, not the whole portfolio. Raise it deliberately once a few
+# scans have run clean.
+MAX_DEACTIVATIONS_PER_SCAN = 10
 
 KEEP = "keep"
 REDUCE = "reduce"
@@ -112,6 +118,54 @@ def decide(listing_quantity: Optional[int], passes_left: Optional[int],
                 "reason": f"only {target} can be fulfilled ({in_hand} in hand + {buyable} still buyable)"}
     return {"action": KEEP, "target_quantity": target, "passes_in_hand": in_hand,
             "buyable_at_source": buyable, "reason": "enough available to cover the listing"}
+
+
+def carry_out(alerts: List[Dict[str, Any]], source: str,
+              id_field: str) -> Dict[str, Any]:
+    """
+    Do the deactivations in `alerts`, if this platform's writes are enabled.
+
+    Returns a summary: what was done, what was skipped and why. Never raises —
+    a platform refusing a write must not fail the scan that found it.
+
+    Two guards beyond the write switch itself:
+      * only DEACTIVATE is carried out, never a quantity change;
+      * at most MAX_DEACTIVATIONS_PER_SCAN, so a bad reading cannot empty the
+        portfolio before anyone notices.
+    """
+    done, skipped, failed = [], [], []
+    if not writes_enabled(source):
+        return {"enabled": False, "done": [], "skipped": [], "failed": [],
+                "reason": f"{source.upper()}_ALLOW_WRITES is off"}
+
+    for alert in alerts:
+        decision = alert.get("decision") or {}
+        if decision.get("action") != DEACTIVATE:
+            continue
+        listing_id = str(alert.get(id_field) or "").strip()
+        if not listing_id:
+            # Lysted's export carries no listing id and their API will not
+            # list listings, so this is the normal case there until that
+            # changes. Reported rather than guessed at.
+            skipped.append({"listing": alert.get("listing_key"), "reason": f"no {id_field}"})
+            continue
+        if len(done) >= MAX_DEACTIVATIONS_PER_SCAN:
+            skipped.append({"listing": alert.get("listing_key"),
+                            "reason": f"per-scan cap of {MAX_DEACTIVATIONS_PER_SCAN} reached"})
+            continue
+
+        result = apply_action({**alert, id_field: listing_id}, decision, source)
+        if result.get("applied"):
+            done.append({"listing": alert.get("listing_key"), "id": listing_id,
+                         "event": alert.get("event_name"), "section": alert.get("section")})
+            logger.info("%s: deactivated %s (%s — %s)", source, listing_id,
+                        alert.get("event_name"), alert.get("section"))
+        else:
+            failed.append({"listing": alert.get("listing_key"), "id": listing_id,
+                           "reason": result.get("reason")})
+            logger.error("%s: could not deactivate %s — %s", source, listing_id, result.get("reason"))
+
+    return {"enabled": True, "done": done, "skipped": skipped, "failed": failed}
 
 
 def describe(decision: Dict[str, Any], listing_quantity: Optional[int]) -> str:

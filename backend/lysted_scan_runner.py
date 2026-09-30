@@ -21,7 +21,7 @@ from database import LystedSoldOutAlert, PriceSpike, ScarcityCheck, get_session
 import listing_actions
 import spare_spots
 from lysted_listings import SOURCE, get_latest_upload, load_active_listings
-from teams_notify import notify_lysted_summary
+from teams_notify import notify_deactivations, notify_lysted_summary
 
 logger = logging.getLogger(__name__)
 
@@ -366,6 +366,18 @@ def _run_locked(notify: bool, event_limit: Optional[int]) -> Dict[str, Any]:
         spikes = collect_price_spikes(db, listings, scan_started)
         low_inventory = detect_low_inventory_crossings(db, listings, scan_started)
 
+        # Act on the decisions, if writes are on. Lysted listings carry no id
+        # in the export and their API will not list listings, so in practice
+        # this deactivates only what an id could be found for and reports the
+        # rest — see listing_actions.carry_out.
+        carried = listing_actions.carry_out(alerts, SOURCE, "lysted_listing_id")
+        if carried["enabled"]:
+            logger.info("Lysted deactivations: %d done, %d skipped, %d failed",
+                        len(carried["done"]), len(carried["skipped"]), len(carried["failed"]))
+            if notify:
+                # Its own chat: what the tool changed, not what it saw.
+                notify_deactivations(carried["done"], carried["failed"], source="Lysted")
+
         # One summary card per scan, like the team's Daily Sold Summary:
         # totals, then what to deactivate, then the pricing signal.
         if notify:
@@ -395,6 +407,10 @@ def _run_locked(notify: bool, event_limit: Optional[int]) -> Dict[str, Any]:
         "price_spikes_detected": len(spikes),
         "low_inventory_alerts_detected": len(low_inventory),
         "pricing_notified": pricing_notified,
+        "deactivated": len(carried["done"]),
+        "deactivation_skipped": len(carried["skipped"]),
+        "deactivation_failed": len(carried["failed"]),
+        "writes_enabled": carried["enabled"],
     }
     logger.info("Lysted scan + sold-out detection complete: %s", out)
     return out

@@ -312,6 +312,53 @@ def _day_before_text(a: Dict[str, Any]) -> str:
                         else "Lysted listing: —"])
 
 
+def notify_deactivations(done: List[Dict[str, Any]], failed: List[Dict[str, Any]] = None,
+                         source: str = "Lysted",
+                         webhook_env_var: str = "DEACTIVATION_TEAMS_WEBHOOK_URL") -> bool:
+    """
+    One card per scan listing what was actually taken off sale.
+
+    Its own chat and its own card on purpose: the summary card is a reading of
+    the market, this is a record of what the tool changed. A group watching
+    for changes should not have to read past price spikes to find them, and a
+    failed deactivation is something someone must finish by hand.
+
+    done / failed: the lists from listing_actions.carry_out.
+    """
+    failed = failed or []
+    if not done and not failed:
+        return False
+    url = _webhook_url(webhook_env_var)
+    if not url:
+        logger.info("%s not set — %d deactivation(s) not reported", webhook_env_var, len(done))
+        return False
+
+    counts = [f"{len(done)} deactivated"] + ([f"{len(failed)} failed"] if failed else [])
+    body = [_header(f"🚫 {source}: {' · '.join(counts)}"),
+            _totals([("Taken off sale", len(done)), ("Failed", len(failed))])]
+    if done:
+        body.append(_section("Deactivated — sold out at source, nothing left in hand"))
+        body += _lines(done, _deactivated_text, MAX_SOLD_OUT_LINES)
+    if failed:
+        body.append(_section("⚠️ Could not be deactivated — please do these by hand"))
+        body += _lines(failed, _deactivation_failed_text, MAX_SOLD_OUT_LINES)
+    body.append(_note("Done automatically by the tool — no action needed unless a listing failed."))
+    return _post(url, _envelope(body), f"{len(done)} deactivation(s), {len(failed)} failure(s)")
+
+
+def _deactivated_text(d: Dict[str, Any]) -> str:
+    head = " · ".join(x for x in (d.get("event") or "(unknown event)",
+                                  _event_when(d.get("event_date")), d.get("venue")) if x)
+    return "  \n".join([f"• **{head}**",
+                         f"Lot: {d.get('section') or '(unknown lot)'}",
+                         f"Listing id: {d.get('id') or '—'}"])
+
+
+def _deactivation_failed_text(d: Dict[str, Any]) -> str:
+    return (f"• **{d.get('event') or d.get('listing') or 'listing'}** "
+            f"(id {d.get('id') or '—'})  \n{d.get('reason') or 'unknown error'}")
+
+
 def notify_lysted_summary(stats: Dict[str, int], sold_out: List[Dict[str, Any]],
                           spikes: List[Dict[str, Any]], low_inventory: List[Dict[str, Any]],
                           webhook_env_var: str = "LYSTED_TEAMS_WEBHOOK_URL",

@@ -304,6 +304,48 @@ def fetch_export_csv() -> bytes:
     return resp.content
 
 
+def fetch_event_listings(event_id: str, date_offset: int = -330) -> List[Dict[str, Any]]:
+    """
+    Every listing on one event, each with its Lysted id.
+
+    This is the call the Tickets page makes when an event row is expanded
+    (captured 2026-09-29), and it is the only route to listing ids this
+    account has: /api/listings and friends answer 403, and the inventory
+    export carries no id column. Without an id nothing can be deactivated,
+    since Lysted addresses a listing only by id.
+
+    dateOffset is the browser's timezone offset in minutes, as the web app
+    sends it; it shifts which events count as upcoming, not the listings.
+    """
+    data = _get(f"/listings/events/{event_id}", {"dateOffset": date_offset})
+    return list(data.get("listings") or [])
+
+
+def fetch_listing_ids(events: Optional[List[Dict[str, Any]]] = None,
+                      max_events: int = 400) -> Dict[str, List[Dict[str, Any]]]:
+    """
+    {event_id: [listing, ...]} for every event on the account.
+
+    One request per event, spaced by _REQUEST_GAP_SECONDS — a few hundred
+    polite calls against an API we do not own. Failures on a single event are
+    logged and skipped rather than abandoning the rest.
+    """
+    events = events if events is not None else fetch_events()
+    out: Dict[str, List[Dict[str, Any]]] = {}
+    for i, event in enumerate(events[:max_events]):
+        event_id = event.get("event_id") or event.get("id")
+        if not event_id:
+            continue
+        try:
+            out[str(event_id)] = fetch_event_listings(str(event_id))
+        except LystedApiUnavailable as exc:
+            logger.warning("Lysted: could not read listings for event %s — %s", event_id, exc)
+        if i + 1 < len(events):
+            time.sleep(_REQUEST_GAP_SECONDS)
+    logger.info("Lysted: read listing ids for %d event(s)", len(out))
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Writing back: taking a listing off sale
 # ---------------------------------------------------------------------------
@@ -359,6 +401,92 @@ def set_broadcast(listing_id: str, broadcast: bool = False, dry_run: bool = True
     return {"ok": True, "dry_run": False, "listing_id": listing_id, "broadcast": broadcast}
 
 
+def resolve_listing_ids(upload_id: Optional[int] = None) -> Dict[str, Any]:
+    """
+    Fill in each stored listing's Lysted id, so it can be acted on.
+
+    The export identifies a listing by event, date and section text, and
+    carries no id. Lysted's own per-event listing call does carry ids, so the
+    two are matched here on event and section — the same text on both sides,
+    since both come from Lysted.
+
+    Quantity breaks the rare tie where one event has two listings with the
+    same section text. A listing that still cannot be told apart is left
+    without an id rather than guessed at: a wrong id would deactivate
+    somebody else's listing.
+
+    Never raises; returns what it managed.
+    """
+    from database import LystedListing, get_session
+    from lysted_listings import _norm, get_latest_upload
+
+    status = api_status()
+    if not status["usable"]:
+        return {"status": "skipped", "reason": status["reason"], "resolved": 0}
+
+    db = get_session()
+    try:
+        if upload_id is None:
+            upload = get_latest_upload(db)
+            if upload is None:
+                return {"status": "skipped", "reason": "no upload", "resolved": 0}
+            upload_id = upload.id
+
+        rows = db.query(LystedListing).filter(LystedListing.upload_id == upload_id).all()
+        if not rows:
+            return {"status": "skipped", "reason": "upload has no listings", "resolved": 0}
+
+        try:
+            events = fetch_events()
+        except LystedApiUnavailable as exc:
+            return {"status": "unavailable", "reason": str(exc), "resolved": 0}
+
+        # Our rows know the event by name and date; Lysted knows it by id.
+        by_event: Dict[tuple, str] = {}
+        for e in events:
+            key = (_norm(e.get("event_name")), (e.get("event_date") or "")[:10])
+            if e.get("event_id"):
+                by_event[key] = str(e["event_id"])
+
+        wanted = {}
+        for r in rows:
+            event_id = by_event.get((_norm(r.event_name_raw), (r.event_date or "")[:10]))
+            if event_id:
+                wanted.setdefault(event_id, []).append(r)
+
+        resolved = ambiguous = 0
+        for i, (event_id, listing_rows) in enumerate(wanted.items()):
+            try:
+                theirs = fetch_event_listings(event_id)
+            except LystedApiUnavailable as exc:
+                logger.warning("Lysted: listings for event %s unavailable — %s", event_id, exc)
+                continue
+            for r in listing_rows:
+                matches = [t for t in theirs if _norm(t.get("section")) == _norm(r.section)]
+                if len(matches) > 1 and r.quantity is not None:
+                    narrowed = [t for t in matches if t.get("quantity") == r.quantity]
+                    matches = narrowed or matches
+                if len(matches) == 1:
+                    r.lysted_listing_id = str(matches[0].get("id") or "") or None
+                    resolved += 1
+                elif matches:
+                    ambiguous += 1
+            if i + 1 < len(wanted):
+                time.sleep(_REQUEST_GAP_SECONDS)
+        db.commit()
+    except Exception as exc:                     # never break a scan over this
+        logger.error("Lysted: resolving listing ids failed: %s", exc)
+        return {"status": "failed", "reason": str(exc), "resolved": 0}
+    finally:
+        db.close()
+
+    out = {"status": "resolved", "upload_id": upload_id, "listings": len(rows),
+           "events_matched": len(wanted), "resolved": resolved, "ambiguous": ambiguous,
+           "unresolved": len(rows) - resolved}
+    logger.info("Lysted listing ids: %s", out)
+    return out
+
+
 def sync_from_api() -> Dict[str, Any]:
     """
     Refresh the active Lysted inventory from the API. Never raises.
@@ -391,4 +519,7 @@ def sync_from_api() -> Dict[str, Any]:
         return {"status": "unavailable", "reason": f"export format changed: {exc}"}
 
     logger.info("Lysted API sync saved %d listings (%d live)", summary["row_count"], summary["active_count"])
-    return {"status": "synced", **summary}
+    # Ids are what make a listing actionable, so resolve them while the token
+    # is known good rather than at deactivation time.
+    ids = resolve_listing_ids(summary.get("upload_id"))
+    return {"status": "synced", **summary, "listing_ids": ids}

@@ -463,6 +463,11 @@ class LystedListing(Base):
     upload_id = Column(Integer, nullable=False, index=True)
     listing_key = Column(String(400), nullable=False, index=True)
     event_key = Column(String(400), nullable=False, index=True)
+    # Lysted's own id for this listing, resolved after an upload
+    # (lysted_api.resolve_listing_ids). The export has no id column, so
+    # without this nothing can be deactivated: Lysted addresses a listing
+    # only by id.
+    lysted_listing_id = Column(String(30), nullable=True, index=True)
     is_active = Column(Boolean, nullable=False, default=True, index=True)
 
     username = Column(String(200), nullable=True)
@@ -577,6 +582,7 @@ def create_tables() -> None:
     _ensure_column("lysted_sold_out_alerts", "passes_left", "INTEGER")
     _ensure_column("lysted_sold_out_alerts", "source", "VARCHAR(20)")
     _ensure_column("lysted_sold_out_alerts", "reason", "VARCHAR(30)")
+    _ensure_column("lysted_listings", "lysted_listing_id", "VARCHAR(30)")
 
 
 def get_db():

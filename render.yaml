@@ -33,6 +33,19 @@ services:
         sync: false
       - key: LYSTED_TEAMS_WEBHOOK_URL
         sync: false
+      # The ReachPro flow's chat, and the chat that receives only what the
+      # tool actually took off sale. Both optional: with either unset, that
+      # stream simply posts nothing.
+      - key: REACHPRO_TEAMS_WEBHOOK_URL
+        sync: false
+      - key: DEACTIVATION_TEAMS_WEBHOOK_URL
+        sync: false
+      # Deactivating on a live sales platform is off unless deliberately
+      # turned on. Unset, a scan decides and reports but changes nothing.
+      - key: LYSTED_ALLOW_WRITES
+        value: ""
+      - key: REACHPRO_ALLOW_WRITES
+        value: ""
       - key: FACILITY_SCAN_INTERVAL_HOURS
         value: "1"
       - key: EVENTS_SCAN_INTERVAL_HOURS

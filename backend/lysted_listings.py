@@ -265,6 +265,7 @@ def load_active_listings(db=None) -> List[Dict[str, Any]]:
         return [
             {
                 "reachpro_listing_id": r.listing_key,
+                "lysted_listing_id": r.lysted_listing_id,
                 "reachpro_event_id": r.event_key,
                 "event_name": r.event_name or r.event_name_raw or "",
                 "event_venue": r.venue or "",
