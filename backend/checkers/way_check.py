@@ -67,6 +67,15 @@ _CRAWL_DELAY_SECONDS = 5.0
 _last_request_at = 0.0
 _rate_lock = threading.Lock()
 
+# Way answers 403 when it decides we have asked for too much in a window —
+# a few hundred requests over half an hour did it once. Hammering through
+# that is both rude and pointless, so a refusal pauses every Way check for a
+# while and the scan carries on with the other platforms. The listing simply
+# reads "not checked" on Way until the pause lifts.
+_COOLDOWN_SECONDS = 15 * 60
+_cooldown_until = 0.0
+_RETRY_AFTER_SECONDS = 30
+
 # Their WAF rejects Python's TLS fingerprint with a Cloudflare challenge while
 # answering curl normally — a bot-management heuristic, not a rule about who
 # may read these pages, which robots.txt settles. Rather than dress requests
@@ -103,8 +112,42 @@ def _wait_for_turn() -> None:
         _last_request_at = time.monotonic()
 
 
+def _in_cooldown() -> Optional[str]:
+    left = _cooldown_until - time.monotonic()
+    if left > 0:
+        return f"Way.com asked us to slow down — paused for another {left/60:.0f} min"
+    return None
+
+
+def _start_cooldown() -> None:
+    global _cooldown_until
+    _cooldown_until = time.monotonic() + _COOLDOWN_SECONDS
+    logger.warning("Way.com returned 403 — pausing Way checks for %d minutes", _COOLDOWN_SECONDS // 60)
+
+
 def _post(url: str, payload: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
-    """(data, error). Never raises: a platform being unreachable is a reading, not a crash."""
+    """
+    (data, error). Never raises: a platform being unreachable is a reading,
+    not a crash.
+
+    A 403 is retried once after a pause, since it is usually a rate limit
+    rather than a refusal; a second one stops Way checks for a while.
+    """
+    paused = _in_cooldown()
+    if paused:
+        return None, paused
+
+    data, err = _post_once(url, payload)
+    if err == "HTTP 403":
+        time.sleep(_RETRY_AFTER_SECONDS)
+        data, err = _post_once(url, payload)
+        if err == "HTTP 403":
+            _start_cooldown()
+            return None, "Way.com rate-limited us (403) — paused"
+    return data, err
+
+
+def _post_once(url: str, payload: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     _wait_for_turn()
     args = [_CURL, "-s", "--max-time", str(_TIMEOUT), "--url", url, "--data-binary", "@-",
             "-w", "\n%{http_code}"]
@@ -171,7 +214,11 @@ def _float(value: Any) -> Optional[float]:
         return None
 
 
-_cache: Dict[tuple, Tuple[List[Dict[str, Any]], Optional[str]]] = {}
+# Entries expire: a scan runs every three hours and availability is the whole
+# point, so a reading kept beyond one scan would quietly report yesterday's
+# inventory as today's.
+_CACHE_TTL_SECONDS = 45 * 60
+_cache: Dict[tuple, Tuple[float, Tuple[List[Dict[str, Any]], Optional[str]]]] = {}
 _cache_lock = threading.Lock()
 
 
@@ -187,12 +234,17 @@ def search_lots_cached(lat: float, lon: float, event_date: str) -> Tuple[List[Di
     to about a hundred metres so listings at the same venue share an entry.
     """
     key = (round(lat, 3), round(lon, 3), (event_date or "")[:13])
+    now = time.monotonic()
     with _cache_lock:
-        if key in _cache:
-            return _cache[key]
+        cached = _cache.get(key)
+        if cached and now - cached[0] < _CACHE_TTL_SECONDS:
+            return cached[1]
     result = search_lots(lat, lon, event_date)
-    with _cache_lock:
-        _cache[key] = result
+    # Don't cache a failure for three quarters of an hour — a rate limit or a
+    # blip would otherwise blank Way for every listing at that venue.
+    if result[1] is None:
+        with _cache_lock:
+            _cache[key] = (now, result)
     return result
 
 
