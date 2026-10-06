@@ -37,7 +37,7 @@ import csv
 import io
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from database import LystedListing, LystedUpload, create_tables, get_session
@@ -241,6 +241,27 @@ def get_latest_upload(db=None) -> Optional[LystedUpload]:
             db.close()
 
 
+# How far past an event's start we still treat its listing as worth checking.
+#
+# Event dates in the export carry no timezone, and venues run from Eastern to
+# Hawaii, so a naive comparison against our own clock would call an event
+# "past" while it is still hours away locally — a 7pm Pacific event reads as
+# 19:00 against an IST machine already at 23:00. A day's grace covers the
+# worst offset plus the length of an event, and still drops the genuinely old
+# ones: the team was alerted about a 20 September event in October, and 65 of
+# 366 listings were for events that had already happened (Max, 2026-10-06).
+PAST_EVENT_GRACE_HOURS = 24
+
+
+def _is_upcoming(event_date: Optional[str], now_utc: datetime) -> bool:
+    """Is this event still ahead of us, allowing for timezones we don't know?"""
+    raw = (event_date or "")[:19]
+    if not raw:
+        return True          # no date to judge by — check it rather than drop it
+    cutoff = (now_utc - timedelta(hours=PAST_EVENT_GRACE_HOURS)).strftime("%Y-%m-%dT%H:%M:%S")
+    return raw >= cutoff
+
+
 def load_active_listings(db=None) -> List[Dict[str, Any]]:
     """
     The latest upload's live listings in fetch_all_active_listings' shape:
@@ -262,6 +283,8 @@ def load_active_listings(db=None) -> List[Dict[str, Any]]:
             .order_by(LystedListing.event_date, LystedListing.event_name)
             .all()
         )
+        now_utc = datetime.now(timezone.utc)
+        rows = [r for r in rows if _is_upcoming(r.event_date, now_utc)]
         return [
             {
                 "reachpro_listing_id": r.listing_key,

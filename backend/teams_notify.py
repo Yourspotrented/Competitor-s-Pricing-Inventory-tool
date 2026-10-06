@@ -160,7 +160,7 @@ def _event_when(raw: Optional[str]) -> str:
 
 
 def _platform(name: Optional[str]) -> str:
-    names = {"spothero": "SpotHero", "parkwhiz": "ParkWhiz"}
+    names = {"spothero": "SpotHero", "parkwhiz": "ParkWhiz", "way": "Way.com"}
     return ", ".join(names.get(p.strip().lower(), p.strip()) for p in (name or "").split(",") if p.strip()) or "—"
 
 
@@ -180,6 +180,20 @@ def _spike_text(s: Dict[str, Any]) -> str:
              _platform(s.get("platform")), _where(s)]
     ours = " (our lot)" if s.get("our_lot") else ""
     return f"• **{_lot_label(s)}**{ours} +{s['percent_increase']:.0f}% · " + " · ".join(p for p in parts if p)
+
+
+def _tightest_first(alert: Dict[str, Any]) -> float:
+    """
+    Sort key for low-inventory alerts: least left first.
+
+    ParkWhiz and Way publish no count, so percent_remaining is None for them
+    — comparing that against a number raised
+    "'<' not supported between instances of 'NoneType' and 'float'" and broke
+    the whole card. They sort after the ones we can measure, since a number
+    is more actionable than "running low".
+    """
+    pct = alert.get("percent_remaining")
+    return pct if isinstance(pct, (int, float)) else float("inf")
 
 
 def _low_text(a: Dict[str, Any]) -> str:
@@ -291,7 +305,7 @@ def notify_price_spikes(spikes: List[Dict[str, Any]], low_inventory_alerts: List
         body += _lines(sorted(spikes, key=lambda s: s["percent_increase"], reverse=True), _spike_text)
     if low_inventory_alerts:
         body.append(_section("📉 Low inventory"))
-        body += _lines(sorted(low_inventory_alerts, key=lambda a: a["percent_remaining"]), _low_text)
+        body += _lines(sorted(low_inventory_alerts, key=_tightest_first), _low_text)
     body.append(_note(f"Competitor lots near {subject}. Full list in the dashboard."))
 
     actions = ([{"type": "Action.OpenUrl", "title": "Open Clusters.xlsx", "url": attachment_url}]
@@ -316,6 +330,7 @@ def _day_before_text(a: Dict[str, Any]) -> str:
 
 
 def notify_deactivations(done: List[Dict[str, Any]], failed: List[Dict[str, Any]] = None,
+                         skipped: List[Dict[str, Any]] = None,
                          source: str = "Lysted",
                          webhook_env_var: str = "DEACTIVATION_TEAMS_WEBHOOK_URL") -> bool:
     """
@@ -329,23 +344,39 @@ def notify_deactivations(done: List[Dict[str, Any]], failed: List[Dict[str, Any]
     done / failed: the lists from listing_actions.carry_out.
     """
     failed = failed or []
-    if not done and not failed:
+    # Listings the tool decided to deactivate but could not — no Lysted id,
+    # or the per-scan cap. Reported because silence here reads as "nothing to
+    # do" when it actually means "nobody did it": the live service sat on two
+    # deactivations for days because no id had been resolved and the card
+    # only ever mentioned successes and failures.
+    skipped = skipped or []
+    if not done and not failed and not skipped:
         return False
     url = _webhook_url(webhook_env_var)
     if not url:
         logger.info("%s not set — %d deactivation(s) not reported", webhook_env_var, len(done))
         return False
 
-    counts = [f"{len(done)} deactivated"] + ([f"{len(failed)} failed"] if failed else [])
-    body = [_header(f"🚫 {source}: {' · '.join(counts)}"),
-            _totals([("Taken off sale", len(done)), ("Failed", len(failed))])]
+    counts = [f"{len(done)} deactivated"]
+    if failed:
+        counts.append(f"{len(failed)} failed")
+    if skipped:
+        counts.append(f"{len(skipped)} not actioned")
+    totals = [("Taken off sale", len(done)), ("Failed", len(failed))]
+    if skipped:
+        totals.append(("Could not be actioned", len(skipped)))
+    body = [_header(f"🚫 {source}: {' · '.join(counts)}"), _totals(totals)]
     if done:
         body.append(_section("Deactivated — sold out at source, nothing left in hand"))
         body += _lines(done, _deactivated_text, MAX_SOLD_OUT_LINES)
     if failed:
         body.append(_section("⚠️ Could not be deactivated — please do these by hand"))
         body += _lines(failed, _deactivation_failed_text, MAX_SOLD_OUT_LINES)
-    body.append(_note("Done automatically by the tool — no action needed unless a listing failed."))
+    if skipped:
+        body.append(_section("⚠️ Decided but not actioned — deactivate these by hand"))
+        body += _lines(skipped, _deactivation_failed_text, MAX_SOLD_OUT_LINES)
+    body.append(_note("Done automatically by the tool — anything listed as failed or not "
+                      "actioned still needs a person."))
     return _post(url, _envelope(body), f"{len(done)} deactivation(s), {len(failed)} failure(s)")
 
 
@@ -426,7 +457,7 @@ def notify_lysted_summary(stats: Dict[str, int], sold_out: List[Dict[str, Any]],
         body += _lines(sorted(spikes, key=lambda s: s["percent_increase"], reverse=True), _spike_text)
     if low_inventory:
         body.append(_section("📉 Low inventory"))
-        body += _lines(sorted(low_inventory, key=lambda a: a["percent_remaining"]), _low_text)
+        body += _lines(sorted(low_inventory, key=_tightest_first), _low_text)
     body.append(_note("No listings sold out this scan." if not sold_out
                       else "Full list in the dashboard."))
 

@@ -380,7 +380,8 @@ def _run_locked(notify: bool, event_limit: Optional[int]) -> Dict[str, Any]:
                         len(carried["done"]), len(carried["skipped"]), len(carried["failed"]))
             if notify:
                 # Its own chat: what the tool changed, not what it saw.
-                notify_deactivations(carried["done"], carried["failed"], source="Lysted")
+                notify_deactivations(carried["done"], carried["failed"],
+                                     carried["skipped"], source="Lysted")
 
         # One summary card per scan, like the team's Daily Sold Summary:
         # totals, then what to deactivate, then the pricing signal.
