@@ -550,6 +550,18 @@ const $ = (id) => document.getElementById(id);
 function fmtMoney(v) { return v == null ? '—' : '$' + Number(v).toFixed(2); }
 function fmtDate(iso) { if (!iso) return '—'; const d = new Date(iso); return d.toLocaleString(); }
 
+// Credential times are read by the team in the US, and this dashboard is
+// often open on a machine set to IST — "expires 10:45 PM" then means nothing
+// to whoever has to paste the next token. These are shown in Central instead,
+// labelled, so there is no guessing which clock they refer to.
+function fmtCentral(iso) {
+  if (!iso) return '—';
+  return new Date(iso).toLocaleString('en-US', {
+    timeZone: 'America/Chicago', month: 'short', day: 'numeric',
+    hour: 'numeric', minute: '2-digit',
+  }) + ' CT';
+}
+
 // ParkWhiz statuses: available/limited/sold_out are documented; "unavailable"
 // also shows up in practice (price $0 alongside it) but isn't one of the
 // three ParkWhiz documents — treated as its own state, same severity color
@@ -2133,7 +2145,7 @@ async function refreshReachproCookieStatus() {
     } else if (!s.usable) {
       el.textContent = `ReachPro cookie: not working — ${s.reason || 'paste a fresh one'}.`;
     } else {
-      const when = s.last_saved && s.last_saved.saved_at ? ` (pasted ${fmtDate(s.last_saved.saved_at)})` : '';
+      const when = s.last_saved && s.last_saved.saved_at ? ` (pasted ${fmtCentral(s.last_saved.saved_at)})` : '';
       el.textContent = `ReachPro cookie: working${when}.`;
     }
   } catch (e) { el.style.display = 'none'; }
@@ -2178,7 +2190,7 @@ async function refreshLystedTokenStatus() {
     } else if (!s.usable) {
       el.textContent = `Lysted token: expired — ${s.reason || 'paste a fresh one'}. Until then the last uploaded CSV is used.`;
     } else {
-      el.textContent = `Lysted token: valid for ${s.hours_left}h (until ${fmtDate(s.expires_at)}) — inventory pulls automatically before each scan.`;
+      el.textContent = `Lysted token: valid for ${s.hours_left}h (until ${fmtCentral(s.expires_at)}) — inventory pulls automatically before each scan.`;
     }
   } catch (e) { el.style.display = 'none'; }
 }
@@ -2200,7 +2212,7 @@ $('lystedTokenBtn').addEventListener('click', async () => {
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || 'could not save the token');
     input.value = '';
-    status.textContent = `Token saved — valid for ${data.hours_left}h (until ${fmtDate(data.expires_at)}). The next scan will pull the inventory itself.`;
+    status.textContent = `Token saved — valid for ${data.hours_left}h (until ${fmtCentral(data.expires_at)}). The next scan will pull the inventory itself.`;
   } catch (e) {
     status.textContent = `Could not save the token: ${e.message}`;
   } finally {

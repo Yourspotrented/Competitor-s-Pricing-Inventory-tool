@@ -35,7 +35,6 @@ out/
 .vercel/
 
 # Editor / tooling
-.vscode/
 .idea/
 *.swp
 
@@ -53,3 +52,7 @@ Thumbs.db
 /MEETING_NOTES_*.md
 /LYSTED_CSV_TASK.md
 /CALL_LOG_*.md
+branch_structure.json
+temp_auto_push.bat
+temp_interactive_push.bat
+.gitignore

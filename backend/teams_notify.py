@@ -367,7 +367,7 @@ def notify_deactivations(done: List[Dict[str, Any]], failed: List[Dict[str, Any]
         totals.append(("Could not be actioned", len(skipped)))
     body = [_header(f"🚫 {source}: {' · '.join(counts)}"), _totals(totals)]
     if done:
-        body.append(_section("Deactivated — sold out at source, nothing left in hand"))
+        body.append(_section("Deactivated — sold out at source and we could not cover the listing"))
         body += _lines(done, _deactivated_text, MAX_SOLD_OUT_LINES)
     if failed:
         body.append(_section("⚠️ Could not be deactivated — please do these by hand"))
@@ -383,9 +383,18 @@ def notify_deactivations(done: List[Dict[str, Any]], failed: List[Dict[str, Any]
 def _deactivated_text(d: Dict[str, Any]) -> str:
     head = " · ".join(x for x in (d.get("event") or "(unknown event)",
                                   _event_when(d.get("event_date")), d.get("venue")) if x)
-    return "  \n".join([f"• **{head}**",
-                         f"Lot: {d.get('section') or '(unknown lot)'}",
-                         f"Listing id: {d.get('id') or '—'}"])
+    lines = [f"• **{head}**",
+             f"Lot: {d.get('section') or '(unknown lot)'}",
+             f"Listing id: {d.get('id') or '—'}"]
+    if d.get("why"):
+        lines.append(d["why"][0].upper() + d["why"][1:])
+    # The team's next step, in the message itself: Lysted cannot change a
+    # quantity, so covering fewer passes than listed means delisting and
+    # relisting at the number we hold (Max, 2026-10-07).
+    in_hand = d.get("passes_in_hand")
+    if in_hand:
+        lines.append(f"**We hold {in_hand} — relist with up to {in_hand} if you want to keep selling.**")
+    return "  \n".join(lines)
 
 
 def _deactivation_failed_text(d: Dict[str, Any]) -> str:

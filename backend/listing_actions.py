@@ -108,14 +108,30 @@ def decide(listing_quantity: Optional[int], passes_left: Optional[int],
         return {"action": KEEP, "target_quantity": target, "passes_in_hand": in_hand,
                 "buyable_at_source": buyable, "reason": "listing quantity unknown"}
 
-    if target <= 0:
+    # Sold out at source. The listing can only be honoured out of what we
+    # already hold, and Lysted will not let a quantity be changed once a
+    # listing exists (Leticia, 2026-09-25) — so Max's "reduce 15 to 10" is not
+    # available to us. That leaves two options, and the team chose the
+    # cautious one (Rishabh, 2026-10-07): keep the listing only when our own
+    # passes cover it in full, otherwise take it down.
+    #
+    # Holding 10 against 100 listed and leaving it up risks ninety sales we
+    # cannot deliver — relocations, refunds and a platform rating, which is
+    # the cost Max described. Deactivating loses the ten we could have sold.
+    # The ten are worth less than the ninety.
+    if buyable == 0:
+        if in_hand >= listing_quantity:
+            return {"action": KEEP, "target_quantity": target, "passes_in_hand": in_hand,
+                    "buyable_at_source": buyable,
+                    "reason": f"sold out at source, but our {in_hand} pass(es) cover the listing"}
         return {"action": DEACTIVATE, "target_quantity": 0, "passes_in_hand": in_hand,
                 "buyable_at_source": buyable,
-                "reason": "sold out at source and no passes in hand — cannot be fulfilled"}
-    if target < listing_quantity:
-        return {"action": REDUCE, "target_quantity": target, "passes_in_hand": in_hand,
-                "buyable_at_source": buyable,
-                "reason": f"only {target} can be fulfilled ({in_hand} in hand + {buyable} still buyable)"}
+                "reason": (f"sold out at source and we hold only {in_hand} of {listing_quantity}"
+                           if in_hand else
+                           "sold out at source and no passes in hand — cannot be fulfilled")}
+
+    # Still buyable at source: whatever we cannot cover ourselves can be
+    # bought when it sells, so the listing stands.
     return {"action": KEEP, "target_quantity": target, "passes_in_hand": in_hand,
             "buyable_at_source": buyable, "reason": "enough available to cover the listing"}
 
@@ -157,7 +173,14 @@ def carry_out(alerts: List[Dict[str, Any]], source: str,
         result = apply_action({**alert, id_field: listing_id}, decision, source)
         if result.get("applied"):
             done.append({"listing": alert.get("listing_key"), "id": listing_id,
-                         "event": alert.get("event_name"), "section": alert.get("section")})
+                         "event": alert.get("event_name"), "event_date": alert.get("event_date"),
+                         "venue": alert.get("venue"), "section": alert.get("section"),
+                         # What the team needs to relist with: Max asked for
+                         # the tool to delist and the team to put it back up
+                         # at the number we can actually cover (2026-10-07).
+                         "listed": alert.get("quantity"),
+                         "passes_in_hand": decision.get("passes_in_hand"),
+                         "why": decision.get("reason")})
             logger.info("%s: deactivated %s (%s — %s)", source, listing_id,
                         alert.get("event_name"), alert.get("section"))
         else:
