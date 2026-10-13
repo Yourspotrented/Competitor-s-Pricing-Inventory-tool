@@ -286,6 +286,13 @@
     <button id="lystedRefreshBtn">Refresh</button>
     <button id="lystedScanBtn" class="primary">Check Now</button>
   </div>
+  <div class="controls" id="stagefrontControls" style="display:none;">
+    <input type="password" id="stagefrontToken" class="file-pick" placeholder="Paste Stagefront token…"
+           title="Stagefront session token — inventory is then pulled automatically until it expires" />
+    <button id="stagefrontTokenBtn">Save Token</button>
+    <button id="stagefrontRefreshBtn">Refresh</button>
+    <button id="stagefrontScanBtn" class="primary">Check Now</button>
+  </div>
 </header>
 <div id="scanEta" class="sub" style="padding: 0 28px; display:none;"></div>
 <div id="ourInventorySyncStatus" class="scan-status-line" style="display:none;"></div>
@@ -301,6 +308,8 @@
 <div id="lystedTokenStatus" class="scan-status-line" style="display:none;"></div>
 <div id="lystedUploadStatus" class="scan-status-line" style="display:none;"></div>
 <div id="lystedScanStatus" class="scan-status-line" style="display:none;"></div>
+<div id="stagefrontTokenStatus" class="scan-status-line" style="display:none;"></div>
+<div id="stagefrontScanStatus" class="scan-status-line" style="display:none;"></div>
 
 <div class="view-tabs">
   <!-- The event-level Scarcity and Price Spikes views (ReachPro listings) are
@@ -312,6 +321,7 @@
   <button class="view-tab-btn active" id="viewFacilitiesBtn">Facility Competitors</button>
   <button class="view-tab-btn" id="viewEventsBtn">Events Competitors</button>
   <button class="view-tab-btn" id="viewLystedBtn">Lysted Listings</button>
+  <button class="view-tab-btn" id="viewStagefrontBtn">Stagefront Listings</button>
   <button class="view-tab-btn" id="viewActionsBtn">Actions</button>
 </div>
 
@@ -504,6 +514,50 @@
       </table>
     </div>
     <div id="lystedAlertsEmptyState" class="empty" style="display:none;">No listings have gone sold-out at source in the latest check. This view shows one check at a time, so an empty table means every live listing can still be fulfilled.</div>
+  </div>
+</main>
+
+<main id="stagefrontView" style="display:none;">
+  <div class="view-tabs" style="padding: 16px 28px 0;">
+    <button class="view-tab-btn active" id="viewStagefrontListBtn" style="font-size:13px;padding:6px 14px;">Listings</button>
+    <button class="view-tab-btn" id="viewStagefrontAlertsBtn" style="font-size:13px;padding:6px 14px;">Sold-out Alerts</button>
+  </div>
+  <div id="stagefrontSchedulerStatus" class="scan-status-line" style="padding: 8px 28px 0;"></div>
+
+  <div id="stagefrontListSubview">
+    <div class="facility-controls">
+      <input type="search" id="stagefrontSearch" placeholder="Filter by event, venue, city, or lot…" />
+      <button class="facility-filter-btn stagefront-filter-btn active" data-filter="all">All</button>
+      <button class="facility-filter-btn stagefront-filter-btn" data-filter="sold_out">Sold out at source</button>
+      <button class="facility-filter-btn stagefront-filter-btn" data-filter="limited">Limited</button>
+      <button class="facility-filter-btn stagefront-filter-btn" data-filter="not_found">Not found</button>
+      <button class="facility-filter-btn stagefront-filter-btn" data-filter="unchecked">Not checked</button>
+    </div>
+    <div style="padding: 12px 28px 0;">
+      <div id="stagefrontCaption" class="sub" style="margin-bottom:10px;"></div>
+      <div class="tbl-shell">
+        <table>
+          <thead>
+            <tr><th>Event</th><th>Date</th><th>Venue</th><th title="The parking lot behind the listing — Stagefront's Section field">Lot</th><th>Qty</th><th>Price</th><th title="Availability of that lot on SpotHero for the event window">SpotHero</th><th title="Availability of that lot on ParkWhiz for the event window">ParkWhiz</th><th title="Availability of that lot on Way.com for the event window — Way publishes no spots-left count, so it reads available or sold out">Way.com</th><th>Checked</th></tr>
+          </thead>
+          <tbody id="stagefrontRows"></tbody>
+        </table>
+      </div>
+      <div id="stagefrontEmptyState" class="empty" style="display:none;">No Stagefront sync yet. Paste a token above and click "Check Now", or "Refresh" if one has already run.</div>
+    </div>
+  </div>
+
+  <div id="stagefrontAlertsSubview" style="display:none; padding: 16px 28px;">
+    <div id="stagefrontAlertsCaption" class="sub" style="margin-bottom:10px;"></div>
+    <div class="tbl-shell">
+      <table>
+        <thead>
+          <tr><th>Event</th><th>Date</th><th>Venue</th><th>Lot</th><th>Sold out on</th><th>Qty</th><th>Price</th><th>Was showing</th><th>Notified</th><th>Detected</th></tr>
+        </thead>
+        <tbody id="stagefrontAlertRows"></tbody>
+      </table>
+    </div>
+    <div id="stagefrontAlertsEmptyState" class="empty" style="display:none;">No listings have gone sold-out at source in the latest check. This view shows one check at a time, so an empty table means every live listing can still be fulfilled.</div>
   </div>
 </main>
 
@@ -914,25 +968,31 @@ const VIEW_COPY = {
     title: 'Lysted Listings',
     sub: 'Our live Lysted listings checked against the buying platforms — anything sold out at source can no longer be fulfilled and needs deactivating',
   },
+  stagefront: {
+    title: 'Stagefront Listings',
+    sub: 'Our live Stagefront listings checked against the buying platforms — anything sold out at source can no longer be fulfilled. Deactivating from here isn’t built yet; this view is detection and alerting only',
+  },
   events: {
     title: 'Events Competitor Scan',
     sub: 'Competitor inventory around the Events team’s facility portfolio (Rex’s sheet) — separate pipeline, radius, and Teams alerts from the pricing flow',
   },
 };
 
-const PORTFOLIO_VIEWS = ['facilities', 'events', 'lysted', 'actions'];  // own header controls, no summary tiles
+const PORTFOLIO_VIEWS = ['facilities', 'events', 'lysted', 'stagefront', 'actions'];  // own header controls, no summary tiles
 function switchView(view) {
   $('scarcityView').style.display = view === 'scarcity' ? '' : 'none';
   $('spikesView').style.display = view === 'spikes' ? '' : 'none';
   $('facilitiesView').style.display = view === 'facilities' ? '' : 'none';
   $('eventsView').style.display = view === 'events' ? '' : 'none';
   $('lystedView').style.display = view === 'lysted' ? '' : 'none';
+  $('stagefrontView').style.display = view === 'stagefront' ? '' : 'none';
   $('actionsView').style.display = view === 'actions' ? '' : 'none';
   $('viewScarcityBtn').classList.toggle('active', view === 'scarcity');
   $('viewSpikesBtn').classList.toggle('active', view === 'spikes');
   $('viewFacilitiesBtn').classList.toggle('active', view === 'facilities');
   $('viewEventsBtn').classList.toggle('active', view === 'events');
   $('viewLystedBtn').classList.toggle('active', view === 'lysted');
+  $('viewStagefrontBtn').classList.toggle('active', view === 'stagefront');
   $('viewActionsBtn').classList.toggle('active', view === 'actions');
 
   const portfolio = PORTFOLIO_VIEWS.includes(view);
@@ -940,6 +1000,7 @@ function switchView(view) {
   $('facilityControls').style.display = view === 'facilities' ? '' : 'none';
   $('eventsControls').style.display = view === 'events' ? '' : 'none';
   $('lystedControls').style.display = view === 'lysted' ? '' : 'none';
+  $('stagefrontControls').style.display = view === 'stagefront' ? '' : 'none';
   $('scarcityFilter').style.display = view === 'scarcity' ? '' : 'none';
   $('platformFilter').style.display = view === 'scarcity' ? '' : 'none';
   $('summary').style.display = portfolio ? 'none' : '';
@@ -967,6 +1028,11 @@ $('viewLystedBtn').addEventListener('click', () => {
   switchView('lysted'); loadLysted(); pollLystedScanStatus();
   if (!_lystedSchedulerPollStarted) { _lystedSchedulerPollStarted = true; pollLystedSchedulerStatus(); }
 });
+let _stagefrontSchedulerPollStarted = false;
+$('viewStagefrontBtn').addEventListener('click', () => {
+  switchView('stagefront'); loadStagefront(); pollStagefrontScanStatus();
+  if (!_stagefrontSchedulerPollStarted) { _stagefrontSchedulerPollStarted = true; pollStagefrontSchedulerStatus(); }
+});
 
 $('viewActionsBtn').addEventListener('click', () => { switchView('actions'); loadActions(); });
 
@@ -986,8 +1052,8 @@ async function loadActions() {
   const rows = data.actions || [];
   const w = data.writes || {};
   $('actionsWriteState').textContent =
-    `Writing to Lysted: ${w.lysted ? 'ON' : 'off'} · Writing to ReachPro: ${w.reachpro ? 'ON' : 'off'}` +
-    (w.lysted || w.reachpro ? ' — Apply will change the live listing.'
+    `Writing to Lysted: ${w.lysted ? 'ON' : 'off'} · Writing to ReachPro: ${w.reachpro ? 'ON' : 'off'} · Writing to Stagefront: ${w.stagefront ? 'ON' : 'off'}` +
+    (w.lysted || w.reachpro || w.stagefront ? ' — Apply will change the live listing.'
                             : ' — Apply shows the request that would be sent, and changes nothing.');
   const tbody = $('actionRows');
   tbody.innerHTML = '';
@@ -2310,6 +2376,228 @@ $('lystedScanBtn').addEventListener('click', async () => {
     return;
   }
   pollLystedScanStatus();
+});
+
+// ---------------------------------------------------------------------------
+// Stagefront Listings view — same question as the Lysted view above, read
+// from Stagefront's own API sync instead of a CSV export. Deactivation isn't
+// built yet (no captured endpoint), so this view is detection and alerting
+// only — see docs/PROJECT_KNOWLEDGE.md.
+// ---------------------------------------------------------------------------
+
+let STAGEFRONT_ROWS = [];
+let stagefrontFilter = 'all';
+const STAGEFRONT_RANK = LYSTED_RANK;  // same ranking rule: worst reading first
+
+function stagefrontRowLevel(r) {
+  const levels = [
+    r.spothero && r.spothero.scarcity_level,
+    r.parkwhiz && r.parkwhiz.scarcity_level,
+    r.way && r.way.scarcity_level,
+  ].filter(Boolean);
+  if (!levels.length) return 'unchecked';
+  for (const lvl of ['sold_out', 'limited', 'ok', 'not_found']) if (levels.includes(lvl)) return lvl;
+  return 'unknown';
+}
+
+function renderStagefrontCaption(sync, rows) {
+  const el = $('stagefrontCaption');
+  if (!sync) { el.textContent = ''; return; }
+  const stamps = rows.map(r => r.last_checked_at).filter(Boolean).sort();
+  const last = stamps.length ? stamps[stamps.length - 1] : null;
+  el.textContent = `${rows.length} live listing${rows.length === 1 ? '' : 's'} from the last sync (${fmtDate(sync.synced_at)}, ${sync.events_seen} event(s) seen)` +
+    (last ? ` · last checked ${fmtDate(last)}` : ' · not checked yet — click "Check Now"');
+}
+
+function renderStagefront() {
+  const q = $('stagefrontSearch').value.trim().toLowerCase();
+  const rows = STAGEFRONT_ROWS
+    .map(r => ({ ...r, _level: stagefrontRowLevel(r) }))
+    .filter(r => stagefrontFilter === 'all' || r._level === stagefrontFilter)
+    .filter(r => !q || `${r.event_name_raw} ${r.venue} ${r.city} ${r.state} ${r.section}`.toLowerCase().includes(q))
+    .sort((a, b) => (STAGEFRONT_RANK[a._level] - STAGEFRONT_RANK[b._level]) || (a.event_date || '').localeCompare(b.event_date || ''));
+
+  const tbody = $('stagefrontRows');
+  tbody.innerHTML = '';
+  $('stagefrontEmptyState').style.display = STAGEFRONT_ROWS.length ? 'none' : 'block';
+  if (STAGEFRONT_ROWS.length && !rows.length) {
+    tbody.innerHTML = `<tr><td colspan="10" class="empty" style="padding:30px;">No listings match this filter.</td></tr>`;
+    return;
+  }
+  for (const r of rows) {
+    const tr = document.createElement('tr');
+    if (r._level === 'sold_out') tr.className = 'spike-row';
+    tr.innerHTML = `
+      <td>${r.event_name_raw || r.event_name || '—'}</td>
+      <td class="muted">${r.event_date ? fmtDate(r.event_date) : '—'}</td>
+      <td class="muted">${r.venue || '—'}${r.city ? `<br>${r.city}${r.state ? ', ' + r.state : ''}` : ''}</td>
+      <td>${r.section || '—'}</td>
+      <td class="price">${r.quantity ?? '—'}</td>
+      <td class="price">${fmtMoney(r.price)}</td>
+      <td>${lystedPlatformCell(r.spothero)}</td>
+      <td>${lystedPlatformCell(r.parkwhiz)}</td>
+      <td>${lystedPlatformCell(r.way)}</td>
+      <td class="muted">${r.last_checked_at ? fmtDate(r.last_checked_at) : '—'}</td>
+    `;
+    tbody.appendChild(tr);
+  }
+}
+
+async function loadStagefront() {
+  refreshStagefrontTokenStatus();
+  const res = await fetch('/api/stagefront/listings');
+  const data = await res.json();
+  STAGEFRONT_ROWS = data.listings || [];
+  renderStagefrontCaption(data.sync, STAGEFRONT_ROWS);
+  renderStagefront();
+}
+
+async function loadStagefrontAlerts() {
+  const res = await fetch('/api/lysted/sold-out-alerts?source=stagefront&latest_run_only=true');
+  const rows = await res.json();
+  renderSpikeCaption($('stagefrontAlertsCaption'), rows, 'sold-out alert');
+  const tbody = $('stagefrontAlertRows');
+  tbody.innerHTML = '';
+  $('stagefrontAlertsEmptyState').style.display = rows.length ? 'none' : 'block';
+  for (const r of rows) {
+    const tr = document.createElement('tr');
+    tr.className = 'spike-row';
+    tr.innerHTML = `
+      <td>${r.event_name || '—'}</td>
+      <td class="muted">${r.event_date ? fmtDate(r.event_date) : '—'}</td>
+      <td class="muted">${r.venue || '—'}${r.state ? `<br>${r.state}` : ''}</td>
+      <td>${r.section || '—'}</td>
+      <td class="plat">${r.platforms || '—'}</td>
+      <td class="price">${r.quantity ?? '—'}</td>
+      <td class="price">${fmtMoney(r.list_price)}</td>
+      <td class="muted">${r.previous_levels || 'first check'}</td>
+      <td>${r.notified ? '<span class="badge ok">Sent</span>' : '<span class="muted">—</span>'}</td>
+      <td class="muted">${fmtDate(r.detected_at)}</td>
+    `;
+    tbody.appendChild(tr);
+  }
+}
+
+function switchStagefrontSubview(view) {
+  $('stagefrontListSubview').style.display = view === 'list' ? '' : 'none';
+  $('stagefrontAlertsSubview').style.display = view === 'alerts' ? '' : 'none';
+  $('viewStagefrontListBtn').classList.toggle('active', view === 'list');
+  $('viewStagefrontAlertsBtn').classList.toggle('active', view === 'alerts');
+  if (view === 'alerts') loadStagefrontAlerts();
+}
+$('viewStagefrontListBtn').addEventListener('click', () => switchStagefrontSubview('list'));
+$('viewStagefrontAlertsBtn').addEventListener('click', () => switchStagefrontSubview('alerts'));
+
+$('stagefrontListSubview').querySelectorAll('.stagefront-filter-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    $('stagefrontListSubview').querySelectorAll('.stagefront-filter-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    stagefrontFilter = btn.dataset.filter;
+    renderStagefront();
+  });
+});
+$('stagefrontSearch').addEventListener('input', renderStagefront);
+$('stagefrontRefreshBtn').addEventListener('click', loadStagefront);
+
+// Stagefront issues no stable API key for this account either — a browser
+// login token is pasted and refreshed by hand, same as Lysted's.
+async function refreshStagefrontTokenStatus() {
+  const el = $('stagefrontTokenStatus');
+  try {
+    const res = await fetch('/api/stagefront/api-status');
+    const s = await res.json();
+    el.style.display = 'block';
+    if (!s.configured) {
+      el.textContent = 'Stagefront token: none saved — paste one to enable syncing and scanning.';
+    } else if (!s.usable) {
+      el.textContent = `Stagefront token: expired — ${s.reason || 'paste a fresh one'}.`;
+    } else {
+      el.textContent = `Stagefront token: valid for ${s.hours_left}h (until ${fmtCentral(s.expires_at)}) — inventory pulls automatically before each scan.`;
+    }
+  } catch (e) { el.style.display = 'none'; }
+}
+
+$('stagefrontTokenBtn').addEventListener('click', async () => {
+  const input = $('stagefrontToken');
+  const status = $('stagefrontTokenStatus');
+  const token = input.value.trim();
+  if (!token) { alert('Paste the Stagefront token first.'); return; }
+  const btn = $('stagefrontTokenBtn');
+  btn.disabled = true;
+  status.style.display = 'block';
+  status.textContent = 'Saving token…';
+  try {
+    const res = await fetch('/api/stagefront/api-token', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'could not save the token');
+    input.value = '';
+    status.textContent = `Token saved — valid for ${data.hours_left}h (until ${fmtCentral(data.expires_at)}). The next scan will pull the inventory itself.`;
+  } catch (e) {
+    status.textContent = `Could not save the token: ${e.message}`;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+async function pollStagefrontScanStatus() {
+  const res = await fetch('/api/stagefront/scan/status');
+  const status = await res.json();
+  const el = $('stagefrontScanStatus');
+  if (status.status === 'running') {
+    $('stagefrontScanBtn').disabled = true;
+    $('stagefrontScanBtn').textContent = status.total_listings ? `Checking… (${status.checked || 0}/${status.total_listings})` : 'Checking…';
+    el.style.display = 'flex';
+    el.innerHTML = `<span class="spinner"></span> Checking listings against SpotHero and ParkWhiz…${status.eta_seconds != null ? ' ' + fmtEta(status.eta_seconds) : ''}`;
+    setTimeout(pollStagefrontScanStatus, 3000);
+  } else {
+    $('stagefrontScanBtn').disabled = false;
+    $('stagefrontScanBtn').textContent = 'Check Now';
+    if (status.status === 'completed' || status.status === 'stopped') {
+      el.style.display = 'flex';
+      const alerts = status.sold_out_alerts_detected || 0;
+      el.innerHTML = `${status.checked} listing(s) checked · ${status.limited_or_sold_out || 0} limited or sold out · ` +
+        (alerts ? `<strong>${alerts} newly sold out at source</strong>${status.notified ? ' · Teams notified' : ' · Teams not configured'}` : 'nothing newly sold out') + '.';
+      loadStagefront();
+    } else if (status.status === 'skipped') {
+      el.style.display = 'flex';
+      el.innerHTML = `<span class="badge limited">Nothing to check</span> paste a Stagefront token and sync first.`;
+    } else if (status.status === 'failed') {
+      el.style.display = 'flex';
+      el.innerHTML = `<span class="badge sold_out">Failed</span> ${status.error || ''}`;
+    } else {
+      el.style.display = 'none';
+    }
+  }
+}
+
+async function pollStagefrontSchedulerStatus() {
+  const res = await fetch('/api/stagefront/scheduler-status');
+  const status = await res.json();
+  const el = $('stagefrontSchedulerStatus');
+  if (status.status === 'running') {
+    el.innerHTML = `<span class="spinner"></span> Scheduled check running (every ${status.interval_hours}h)…`;
+  } else if (status.last_run_summary) {
+    const s = status.last_run_summary;
+    el.innerHTML = s.status === 'skipped'
+      ? `Auto-check every ${status.interval_hours}h · waiting for a Stagefront sync to succeed.`
+      : `Auto-check every ${status.interval_hours}h · last run: ${s.checked} listing(s), ${s.sold_out_alerts_detected || 0} newly sold out${(s.sold_out_alerts_detected || 0) ? (s.notified ? ' · Teams notified' : ' · Teams not configured') : ''}.`;
+  } else if (status.last_run_error) {
+    el.innerHTML = `<span class="badge sold_out">Scheduler error</span> ${status.last_run_error}`;
+  } else {
+    el.innerHTML = `<span class="muted">Scheduler starting…</span>`;
+  }
+  setTimeout(pollStagefrontSchedulerStatus, 30000);
+}
+
+$('stagefrontScanBtn').addEventListener('click', async () => {
+  // The backend always starts the scan attempt (it syncs from the API as
+  // its first step) — "nothing to check" surfaces via polling as
+  // status: 'skipped' if there's genuinely no usable token yet.
+  await fetch('/api/stagefront/scan', { method: 'POST' });
+  pollStagefrontScanStatus();
 });
 
 // Land on Facility Competitors — the Scarcity/Price Spikes views are hidden,

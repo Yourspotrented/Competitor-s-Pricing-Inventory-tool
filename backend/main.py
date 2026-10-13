@@ -18,7 +18,7 @@ from database import (
     ScarcityCheck, LotCheck, PriceSpike, FacilityCompetitorCheck, FacilityPriceSpike,
     OurInventorySnapshot, OurFacilityDatabaseSnapshot, OurSpotheroInventorySnapshot,
     EventsCompetitorCheck, EventsPriceSpike, EventsLowInventoryAlert,
-    LystedListing, LystedSoldOutAlert,
+    LystedListing, LystedSoldOutAlert, StagefrontListing,
     create_tables, get_db, get_session,
 )
 from orchestrator import run_scan, get_current_run, request_stop
@@ -35,6 +35,9 @@ from events_scheduler import start_events_scheduler, get_events_scheduler_status
 from lysted_listings import get_latest_upload, save_upload
 from lysted_scan_runner import run_and_persist_lysted_scan
 from lysted_scheduler import start_lysted_scheduler, get_lysted_scheduler_status
+from stagefront_listings import get_latest_sync as get_latest_stagefront_sync, sync_now as stagefront_sync_now
+from stagefront_scan_runner import run_and_persist_stagefront_scan
+from stagefront_scheduler import start_stagefront_scheduler, get_stagefront_scheduler_status
 from our_inventory import fetch_our_inventory
 from our_facility_database import load_facility_database
 
@@ -100,6 +103,7 @@ def on_startup():
     start_scheduler()
     start_events_scheduler()
     start_lysted_scheduler()
+    start_stagefront_scheduler()
 
 
 @app.get("/")
@@ -1356,7 +1360,12 @@ def lysted_listings(db: Session = Depends(get_db)):
 def trigger_lysted_scan(event_limit: Optional[int] = Query(None)):
     """Check the latest upload's listings against the buying platforms now (background)."""
     current = get_current_run()
-    if current and current.get("status") == "running":
+    # orchestrator._current_run is one global dict shared by every source
+    # (reachpro/lysted/stagefront all call run_scan) — checking status alone,
+    # without also checking which source it belongs to, means a RUNNING
+    # ReachPro or Stagefront scan reads as "a Lysted scan is already running"
+    # and silently blocks this one from ever starting.
+    if current and current.get("status") == "running" and current.get("source") == "lysted":
         return {"status": "already_running", "run": current}
     with _lysted_scan_lock:
         if _lysted_scan_status.get("status") == "running":
@@ -1382,6 +1391,202 @@ def lysted_scan_status():
 @app.get("/api/lysted/scheduler-status")
 def lysted_scheduler_status():
     return get_lysted_scheduler_status()
+
+
+# ---------------------------------------------------------------------------
+# Stagefront listings — same shape as the Lysted flow above, but read
+# straight from Stagefront's own API (QueryEvents + QueryEventInventoryAll —
+# see stagefront_api.py / stagefront_listings.py). No CSV step, and both
+# event and listing ids are Stagefront's own real ids. Deactivation has no
+# captured endpoint yet, so writes stay off — see stagefront_scan_runner.py.
+# ---------------------------------------------------------------------------
+
+_stagefront_scan_lock = threading.Lock()
+_stagefront_scan_status: dict = {"status": "idle"}
+
+
+def _run_stagefront_scan_background(event_limit: Optional[int]) -> None:
+    global _stagefront_scan_status
+    with _stagefront_scan_lock:
+        _stagefront_scan_status = {"status": "running"}
+    try:
+        summary = run_and_persist_stagefront_scan(notify=True, event_limit=event_limit)
+        with _stagefront_scan_lock:
+            _stagefront_scan_status = dict(summary)
+    except Exception as exc:
+        logging.getLogger(__name__).error("Stagefront scan failed: %s", exc)
+        with _stagefront_scan_lock:
+            _stagefront_scan_status = {"status": "failed", "error": str(exc)}
+
+
+def _sync_dict(sync) -> Optional[dict]:
+    if sync is None:
+        return None
+    return {
+        "id": sync.id,
+        "synced_at": sync.synced_at.isoformat() if sync.synced_at else None,
+        "events_seen": sync.events_seen,
+        "listing_count": sync.listing_count,
+        "active_count": sync.active_count,
+    }
+
+
+@app.get("/api/stagefront/api-status")
+def stagefront_api_status():
+    """Whether the Stagefront API sync can run (token set, not expired). No API call."""
+    from stagefront_api import api_status
+    return api_status()
+
+
+@app.post("/api/stagefront/api-token")
+def stagefront_save_api_token(payload: dict = Body(...)):
+    """
+    Save the Stagefront session token pasted on the dashboard — same shape as
+    Lysted's (lysted_save_api_token): Stagefront issues no stable API key for
+    this account either, so a browser login token is pasted and refreshed by
+    hand until that changes.
+    """
+    from stagefront_api import save_token
+    try:
+        return save_token(payload.get("token") or "", payload.get("saved_by") or "")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/stagefront/sync")
+def stagefront_sync():
+    """Pull events + inventory from Stagefront's API now, instead of waiting for the next scan."""
+    return stagefront_sync_now()
+
+
+@app.get("/api/stagefront/sync/latest")
+def stagefront_latest_sync(db: Session = Depends(get_db)):
+    return {"sync": _sync_dict(get_latest_stagefront_sync(db))}
+
+
+@app.get("/api/stagefront/listings")
+def stagefront_listings_view(db: Session = Depends(get_db)):
+    """
+    The latest sync's open listings, each with its most recent SpotHero and
+    ParkWhiz reading (or none, if not checked since the sync).
+    """
+    sync = get_latest_stagefront_sync(db)
+    if sync is None:
+        return {"sync": None, "listings": []}
+
+    rows = (
+        db.query(StagefrontListing)
+        .filter(StagefrontListing.sync_id == sync.id, StagefrontListing.is_active == True)  # noqa: E712
+        .order_by(StagefrontListing.event_date, StagefrontListing.event_name)
+        .all()
+    )
+
+    subq = (
+        db.query(
+            ScarcityCheck.reachpro_listing_id,
+            ScarcityCheck.platform,
+            func.max(ScarcityCheck.checked_at).label("max_checked_at"),
+        )
+        .filter(ScarcityCheck.source == "stagefront")
+        .group_by(ScarcityCheck.reachpro_listing_id, ScarcityCheck.platform)
+        .subquery()
+    )
+    checks = (
+        db.query(ScarcityCheck)
+        .join(
+            subq,
+            (ScarcityCheck.reachpro_listing_id == subq.c.reachpro_listing_id)
+            & (ScarcityCheck.platform == subq.c.platform)
+            & (ScarcityCheck.checked_at == subq.c.max_checked_at),
+        )
+        .all()
+    )
+    by_key = {(c.reachpro_listing_id, c.platform): c for c in checks}
+
+    def _reading(c):
+        if c is None:
+            return None
+        return {
+            "scarcity_level": c.scarcity_level,
+            "is_available": c.is_available,
+            "price": c.price,
+            "spots_left": c.spots_left,
+            "capacity": c.capacity,
+            "percent_remaining": c.percent_remaining,
+            "availability_status": c.availability_status,
+            "error": c.error,
+            "checked_at": c.checked_at.isoformat() if c.checked_at else None,
+        }
+
+    out = []
+    for r in rows:
+        sh = by_key.get((r.stagefront_listing_id, "spothero"))
+        pw = by_key.get((r.stagefront_listing_id, "parkwhiz"))
+        way = by_key.get((r.stagefront_listing_id, "way"))
+        stamps = [c.checked_at for c in (sh, pw, way) if c is not None and c.checked_at]
+        out.append({
+            "stagefront_listing_id": r.stagefront_listing_id,
+            "stagefront_event_id": r.stagefront_event_id,
+            "event_name": r.event_name,
+            "event_name_raw": r.event_name_raw,
+            "event_date": r.event_date,
+            "event_time": r.event_time,
+            "venue": r.venue,
+            "city": r.city,
+            "state": r.state,
+            "section": r.section,
+            "section_raw": r.section_raw,
+            "quantity": r.quantity,
+            "price": r.price,
+            "passes_in_hand": r.passes_in_hand,
+            "spothero": _reading(sh),
+            "parkwhiz": _reading(pw),
+            "way": _reading(way),
+            "last_checked_at": max(stamps).isoformat() if stamps else None,
+        })
+    return {"sync": _sync_dict(sync), "listings": out}
+
+
+@app.post("/api/stagefront/scan")
+def trigger_stagefront_scan(event_limit: Optional[int] = Query(None)):
+    """
+    Check Stagefront's listings against the buying platforms now (background).
+
+    Unlike /api/lysted/scan, there's no pre-check for "nothing synced yet":
+    _run_locked syncs from the API itself as its first step, so refusing to
+    even try before a sync exists would break the one case that matters most
+    — the very first scan right after a token is pasted. If the sync still
+    fails (no token, expired token), the background run reports
+    status="skipped" and the dashboard shows that instead.
+    """
+    current = get_current_run()
+    # See trigger_lysted_scan: must check source too, not just status, since
+    # orchestrator._current_run is shared by every source — without this, a
+    # long-running Lysted scan (its scheduler fires immediately on startup,
+    # same as this one) reads as "Stagefront already running" and this never
+    # starts at all.
+    if current and current.get("status") == "running" and current.get("source") == "stagefront":
+        return {"status": "already_running", "run": current}
+    with _stagefront_scan_lock:
+        if _stagefront_scan_status.get("status") == "running":
+            return {"status": "already_running", "run": _stagefront_scan_status}
+    threading.Thread(target=_run_stagefront_scan_background, kwargs={"event_limit": event_limit}, daemon=True).start()
+    return {"status": "started"}
+
+
+@app.get("/api/stagefront/scan/status")
+def stagefront_scan_status():
+    with _stagefront_scan_lock:
+        status = dict(_stagefront_scan_status)
+    if status.get("status") == "running":
+        current = get_current_run() or {}
+        status.update({k: current.get(k) for k in ("checked", "total_listings", "eta_seconds", "limited_or_sold_out")})
+    return status
+
+
+@app.get("/api/stagefront/scheduler-status")
+def stagefront_scheduler_status():
+    return get_stagefront_scheduler_status()
 
 
 # --- ReachPro: the same sold-out flow against our ReachPro listings ---------
@@ -1443,7 +1648,9 @@ def reachpro_save_cookie(payload: dict = Body(...)):
 def trigger_reachpro_scan(event_limit: Optional[int] = Query(None)):
     """Check our ReachPro listings against the buying platforms now (background)."""
     current = get_current_run()
-    if current and current.get("status") == "running":
+    # See trigger_lysted_scan: this must check source too, not just status,
+    # since orchestrator._current_run is shared by every source.
+    if current and current.get("status") == "running" and current.get("source") == "reachpro":
         return {"status": "already_running", "run": current}
     with _reachpro_scan_lock:
         if _reachpro_scan_status.get("status") == "running":
@@ -1517,7 +1724,8 @@ def pending_actions(limit: int = Query(100, le=500), days: int = Query(ACTION_QU
         })
     return {
         "writes": {"lysted": listing_actions.writes_enabled("lysted"),
-                   "reachpro": listing_actions.writes_enabled("reachpro")},
+                   "reachpro": listing_actions.writes_enabled("reachpro"),
+                   "stagefront": listing_actions.writes_enabled("stagefront")},
         "actions": out,
     }
 
@@ -1549,7 +1757,7 @@ def apply_pending_action(payload: dict = Body(...), db: Session = Depends(get_db
 def lysted_sold_out_alerts(
     latest_run_only: bool = Query(False),
     limit: int = Query(200, le=1000),
-    source: Optional[str] = Query(None, description="lysted | reachpro; both when omitted"),
+    source: Optional[str] = Query(None, description="lysted | reachpro | stagefront; all when omitted"),
     db: Session = Depends(get_db),
 ):
     """Listings that went sold-out at source, most recent first. See facility_price_spikes for latest_run_only."""

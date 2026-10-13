@@ -521,6 +521,67 @@ class LystedSoldOutAlert(Base):
     notified = Column(Boolean, default=False)
 
 
+class StagefrontSync(Base):
+    """
+    One pull of our Stagefront inventory (QueryEvents + QueryEventInventoryAll
+    — see stagefront_api.py / stagefront_listings.py). Lysted-upload parallel,
+    but API-only: there is no CSV step, so this is a sync, not an upload. The
+    latest sync is the active set; older ones stay for history.
+    """
+    __tablename__ = "stagefront_syncs"
+
+    id = Column(Integer, primary_key=True)
+    events_seen = Column(Integer, nullable=False, default=0)    # events QueryEvents returned, before the parking/open filter
+    listing_count = Column(Integer, nullable=False, default=0)
+    active_count = Column(Integer, nullable=False, default=0)   # listings with at least one open (unsold, unheld) pass
+    synced_at = Column(DateTime, default=utcnow, index=True)
+
+
+class StagefrontListing(Base):
+    """
+    One listing from a Stagefront sync — one row per (event, Listing_ID),
+    grouped from QueryEventInventoryAll's per-item rows (see
+    stagefront_listings.flatten). Unlike LystedListing, both ids are
+    Stagefront's own real, stable ids — nothing here is synthesized.
+    """
+    __tablename__ = "stagefront_listings"
+
+    id = Column(Integer, primary_key=True)
+    sync_id = Column(Integer, nullable=False, index=True)
+    stagefront_listing_id = Column(String(50), nullable=False, index=True)
+    stagefront_event_id = Column(String(50), nullable=False, index=True)
+    # At least one pass still open (not sold/completed, not on hold) — see
+    # stagefront_listings._is_open. Stagefront's own "is this broadcasting"
+    # flag hasn't been identified yet (no confirmed Item_Status_ID legend),
+    # so this is the defensive stand-in, same role as Lysted's is_active.
+    is_active = Column(Boolean, nullable=False, default=True, index=True)
+
+    quantity = Column(Integer, nullable=True)         # open passes (not sold/completed, not on hold)
+    quantity_total = Column(Integer, nullable=True)    # open + sold/held
+    # Passes we already physically hold (Item.InHand == true) among the open
+    # ones — Stagefront's native equivalent of ReachPro's unsold_qty, used the
+    # same way: it overrides the Lysted flow's spare-spots lookup, which has
+    # nothing to find for a Stagefront event.
+    passes_in_hand = Column(Integer, nullable=True)
+
+    event_name = Column(String(500), nullable=True)       # cleaned, used for matching
+    event_name_raw = Column(String(500), nullable=True)
+    event_date = Column(String(50), nullable=True)         # ISO, date + actual time combined — see _combine_date_time
+    event_time = Column(String(50), nullable=True)         # Stagefront's own "6:00 PM" text, kept for display
+    venue = Column(String(500), nullable=True)
+    city = Column(String(200), nullable=True)
+    state = Column(String(50), nullable=True)
+    cat_desc = Column(String(100), nullable=True)
+
+    section = Column(String(500), nullable=True)      # cleaned lot/address, used for matching
+    section_raw = Column(String(500), nullable=True)
+    row = Column(String(100), nullable=True)
+    item_status_id = Column(Integer, nullable=True)   # raw — no confirmed legend yet, kept for when one is captured
+    price = Column(Float, nullable=True)
+
+    synced_at = Column(DateTime, default=utcnow, index=True)
+
+
 class PlatformCredential(Base):
     """
     A selling platform's short-lived login, pasted by the team.
@@ -538,7 +599,7 @@ class PlatformCredential(Base):
     __tablename__ = "platform_credentials"
 
     id = Column(Integer, primary_key=True)
-    source = Column(String(20), nullable=False, index=True)   # "lysted" | "reachpro"
+    source = Column(String(20), nullable=False, index=True)   # "lysted" | "reachpro" | "stagefront"
     token = Column(String(8000), nullable=False)
     expires_at = Column(DateTime, nullable=True)     # from the token itself; None for a cookie
     saved_at = Column(DateTime, default=utcnow, index=True)

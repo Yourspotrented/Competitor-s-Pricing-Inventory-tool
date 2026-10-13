@@ -71,15 +71,17 @@ def run_scan(
 ) -> Dict[str, Any]:
     """
     source: where the list of our active listings comes from.
-      "reachpro" — the ReachPro API (regions / events_per_region apply)
-      "lysted"   — the latest uploaded Lysted CSV export (see lysted_listings.py);
-                   regions don't apply, event_limit still caps the run
+      "reachpro"   — the ReachPro API (regions / events_per_region apply)
+      "lysted"     — the latest uploaded Lysted CSV export (see lysted_listings.py);
+                     regions don't apply, event_limit still caps the run
+      "stagefront" — the latest Stagefront API sync (see stagefront_listings.py);
+                     regions don't apply, event_limit still caps the run
     Everything after the fetch — the SpotHero/ParkWhiz checks, persistence,
-    per-lot spike detection — is identical for both.
+    per-lot spike detection — is identical for all three.
     """
     global _current_run
 
-    if source == "lysted":
+    if source in ("lysted", "stagefront"):
         regions = []
     else:
         regions = regions or list(REGION_STATE_IDS.keys())
@@ -106,6 +108,12 @@ def run_scan(
         if source == "lysted":
             from lysted_listings import load_active_listings
             logger.info("Loading active listings from the latest Lysted upload…")
+            listings = load_active_listings()
+            if event_limit:
+                listings = listings[:event_limit]
+        elif source == "stagefront":
+            from stagefront_listings import load_active_listings
+            logger.info("Loading active listings from the latest Stagefront sync…")
             listings = load_active_listings()
             if event_limit:
                 listings = listings[:event_limit]

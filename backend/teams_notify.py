@@ -222,6 +222,17 @@ def _platform_state(detail: Dict[str, Any], platform: str) -> str:
     return text
 
 
+# Which platform a card's alert is about, for the "<X> listing: N passes"
+# line — these dicts carry a "source" field ("lysted" | "reachpro" |
+# "stagefront") but this function used to hardcode "Lysted listing" for all
+# three, which misnamed every ReachPro and (now) Stagefront alert.
+_SOURCE_LABELS = {"lysted": "Lysted listing", "reachpro": "ReachPro listing", "stagefront": "Stagefront listing"}
+
+
+def _listing_label(a: Dict[str, Any]) -> str:
+    return _SOURCE_LABELS.get((a.get("source") or "").lower(), "Listing")
+
+
 def _sold_out_text(a: Dict[str, Any]) -> str:
     """
     One listing, in the shape the listing team reads it (Leticia, 2026-09-18):
@@ -230,11 +241,12 @@ def _sold_out_text(a: Dict[str, Any]) -> str:
     """
     detail = a.get("platform_detail") or {}
     qty = a.get("quantity")
+    label = _listing_label(a)
     head = " · ".join(x for x in (a.get("event_name") or "(unknown event)",
                                   _event_when(a.get("event_date")), a.get("venue")) if x)
     lines = [f"• **{head}**",
              f"Lot: {a.get('section') or '(unknown lot)'}",
-             f"Lysted listing: {qty} pass{'' if qty == 1 else 'es'}" if qty is not None else "Lysted listing: —",
+             f"{label}: {qty} pass{'' if qty == 1 else 'es'}" if qty is not None else f"{label}: —",
              f"SpotHero: {_platform_state(detail, 'spothero')}",
              f"ParkWhiz: {_platform_state(detail, 'parkwhiz')}",
              f"Passes secured: {_secured_text(a)}"]
@@ -321,12 +333,13 @@ def notify_price_spikes(spikes: List[Dict[str, Any]], low_inventory_alerts: List
 def _day_before_text(a: Dict[str, Any]) -> str:
     """The routine day-before line: no platform state, just what to take down."""
     qty = a.get("quantity")
+    label = _listing_label(a)
     head = " · ".join(x for x in (a.get("event_name") or "(unknown event)",
                                   _event_when(a.get("event_date")), a.get("venue")) if x)
     return "  \n".join([f"• **{head}**",
                         f"Lot: {a.get('section') or '(unknown lot)'}",
-                        f"Lysted listing: {qty} pass{'' if qty == 1 else 'es'}" if qty is not None
-                        else "Lysted listing: —"])
+                        f"{label}: {qty} pass{'' if qty == 1 else 'es'}" if qty is not None
+                        else f"{label}: —"])
 
 
 def notify_deactivations(done: List[Dict[str, Any]], failed: List[Dict[str, Any]] = None,
