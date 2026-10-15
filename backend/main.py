@@ -1453,6 +1453,34 @@ def stagefront_save_api_token(payload: dict = Body(...)):
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+@app.get("/api/stagefront/write-cookie-status")
+def stagefront_write_cookie_status():
+    """
+    Whether a session cookie for deactivation writes has been pasted. Not a
+    usability check — there's no safe read-only endpoint to validate a
+    cookie against, so this only reports "saved or not" (see
+    stagefront_api.py); whether it still works surfaces on the first real
+    deactivation attempt.
+    """
+    from stagefront_api import write_cookie_status
+    return write_cookie_status()
+
+
+@app.post("/api/stagefront/write-cookie")
+def stagefront_save_write_cookie(payload: dict = Body(...)):
+    """
+    Save the browser session cookie used for deactivation ("Unshare
+    Everywhere") — a different credential from the Bearer token above: the
+    write action authenticates as a logged-in portal session, not through
+    the read API. See stagefront_api.py's module docstring.
+    """
+    from stagefront_api import save_write_cookie
+    try:
+        return save_write_cookie(payload.get("cookie") or "", payload.get("saved_by") or "")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 @app.post("/api/stagefront/sync")
 def stagefront_sync():
     """Pull events + inventory from Stagefront's API now, instead of waiting for the next scan."""
@@ -1703,9 +1731,13 @@ def pending_actions(limit: int = Query(100, le=500), days: int = Query(ACTION_QU
     out = []
     for r in rows:
         in_hand = r.passes_left
-        # Recomputed rather than stored: wording can change without a
-        # migration, and a stale row should never be actionable.
-        if r.reason == "day_before_event":
+        if r.action:
+            # Stagefront's rule needs platform_detail (not a stored column)
+            # to recompute, so its decision is stored at detection time
+            # instead — see stagefront_scan_runner.py. Lysted/ReachPro rows
+            # never set this column, so they fall through unchanged below.
+            action = r.action
+        elif r.reason == "day_before_event":
             action = "deactivate"
         elif in_hand:
             action = "keep"            # our own passes still cover it
@@ -1747,7 +1779,10 @@ def apply_pending_action(payload: dict = Body(...), db: Session = Depends(get_db
     source = row.source or "lysted"
     listing = {"reachpro_listing_id": row.listing_key,
                "inventory_listing_id": payload.get("inventory_listing_id") or "",
-               "lysted_listing_id": payload.get("lysted_listing_id") or ""}
+               "lysted_listing_id": payload.get("lysted_listing_id") or "",
+               # row.listing_key IS the real Listing_ID for Stagefront rows
+               # (unlike Lysted's synthetic key) — see stagefront_scan_runner.py.
+               "stagefront_listing_id": row.listing_key if source == "stagefront" else ""}
     decision = {"action": payload.get("action") or "deactivate", "target_quantity": 0,
                 "reason": row.reason or "sold_out"}
     return listing_actions.apply_action(listing, decision, source)

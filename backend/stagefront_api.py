@@ -25,8 +25,17 @@ notice.
      one row per physical pass ("Item"); several share one Listing_ID — that
      grouping is what actually identifies a lot (Section), price and status.
 
-Deactivating a listing has no captured endpoint yet, so this module only
-reads — see docs/PROJECT_KNOWLEDGE.md for what's still missing.
+Deactivation ("Unshare Everywhere" in the portal — captured 2026-10-14)
+----------------------------------------------------------------------
+Unlike the two read calls above, this one does NOT use the Bearer token —
+it authenticates with a browser session cookie instead
+(.AspNet.ApplicationCookie / ASP.NET_SessionId / __RequestVerificationToken),
+the same way the ReachPro integration already authenticates (credentials.py,
+source="stagefront_write", separate from the "stagefront" Bearer-token
+credential the read calls use). There is no safe read-only endpoint known
+to validate this cookie against, so — unlike the Bearer token — it's stored
+as pasted, without a pre-save check; whether it still works surfaces on the
+first real call instead.
 """
 from __future__ import annotations
 
@@ -49,6 +58,7 @@ except ImportError:
     pass
 
 API_BASE = "https://portal.stagefront.com/api/Pricing"
+PORTAL_ORIGIN = "https://portal.stagefront.com"
 TOKEN_ENV = "STAGEFRONT_API_TOKEN"
 COMPANY_NAME_ENV = "STAGEFRONT_COMPANY_NAME"
 DEFAULT_COMPANY_NAME = "MaxParkArbLLC (Max Lawrence)"
@@ -219,3 +229,98 @@ def fetch_all_inventory(events: List[Dict[str, Any]]) -> Dict[str, List[Dict[str
             time.sleep(_REQUEST_GAP_SECONDS)
     logger.info("Stagefront: read inventory for %d of %d parking event(s)", len(out), len(worth_checking))
     return out
+
+
+# ---------------------------------------------------------------------------
+# Writing back: taking a listing off sale ("Unshare Everywhere")
+# ---------------------------------------------------------------------------
+
+WRITE_SOURCE = "stagefront_write"
+
+
+def write_cookie() -> str:
+    """The most recently pasted session cookie for writes, or ""."""
+    import credentials
+    return credentials.stored(WRITE_SOURCE)
+
+
+def save_write_cookie(cookie: str, saved_by: str = "") -> Dict[str, Any]:
+    """
+    Store a freshly pasted browser session cookie. No expiry is recorded —
+    unlike the Bearer token, a session cookie carries no readable expiry, so
+    "still working" is only known by trying it (see the module docstring).
+    """
+    import credentials
+
+    cookie = (cookie or "").strip()
+    if not cookie:
+        raise ValueError("no cookie given")
+    return credentials.save(WRITE_SOURCE, cookie, None, saved_by)
+
+
+def write_cookie_status() -> Dict[str, Any]:
+    """Whether a write cookie has been pasted. Not a usability check — see module docstring."""
+    import credentials
+    configured = bool(write_cookie())
+    return {"configured": configured, "last_saved": credentials.last_saved(WRITE_SOURCE) if configured else None}
+
+
+def _write_headers(cookie: str) -> Dict[str, str]:
+    return {
+        "accept": "application/json, text/javascript, */*; q=0.01",
+        "content-type": "application/json",
+        "cookie": cookie,
+        "origin": PORTAL_ORIGIN,
+        "portal-version": "4.22",
+        "referer": f"{PORTAL_ORIGIN}/Pricing",
+        "user-agent": "competitors-data-finder/1.0",
+        "x-requested-with": "XMLHttpRequest",
+    }
+
+
+def unshare_listings(listing_ids: List[Any], dry_run: bool = True) -> Dict[str, Any]:
+    """
+    Take one or more Stagefront listings off every marketplace.
+
+    This is the request the portal sends when "Unshare Everywhere" is
+    clicked on a listing (captured 2026-10-14):
+
+        POST https://portal.stagefront.com/api/Pricing/UpdateListingsSharing
+        body: {"ListingIds": [<id>, ...], "ShareOutSettings": []}
+
+    The underlying inventory/listing is not deleted — this only stops it
+    being distributed, same role as Lysted's set_broadcast(broadcast=False).
+    Authenticates with write_cookie(), not the Bearer token (see module
+    docstring) — a missing or rejected cookie fails closed, same shape as
+    lysted_api.set_broadcast.
+
+    dry_run=True (the default) reports what would be sent and sends nothing.
+    """
+    ids = [str(i).strip() for i in listing_ids if str(i or "").strip()]
+    if not ids:
+        return {"ok": False, "dry_run": dry_run, "reason": "no Stagefront listing id"}
+    try:
+        int_ids = [int(i) for i in ids]
+    except ValueError:
+        return {"ok": False, "dry_run": dry_run, "reason": f"not a numeric listing id: {ids!r}"}
+
+    url = f"{API_BASE}/UpdateListingsSharing"
+    payload = {"ListingIds": int_ids, "ShareOutSettings": []}
+    if dry_run:
+        return {"ok": True, "dry_run": True, "would_post": url, "body": payload, "listing_ids": ids}
+
+    cookie = write_cookie()
+    if not cookie:
+        return {"ok": False, "dry_run": False, "listing_ids": ids,
+                "reason": "no Stagefront session cookie saved — paste one on the dashboard"}
+    try:
+        resp = requests.post(url, json=payload, headers=_write_headers(cookie), timeout=30)
+    except requests.RequestException as exc:
+        return {"ok": False, "dry_run": False, "listing_ids": ids, "reason": f"request failed: {exc}"}
+    if resp.status_code in (401, 403):
+        return {"ok": False, "dry_run": False, "listing_ids": ids,
+                "reason": f"Stagefront refused it (HTTP {resp.status_code}) — session cookie expired or no write permission"}
+    if not resp.ok:
+        return {"ok": False, "dry_run": False, "listing_ids": ids, "reason": f"HTTP {resp.status_code}: {resp.text[:160]}"}
+    logger.info("Stagefront: unshared listing(s) %s", ids)
+    return {"ok": True, "dry_run": False, "listing_ids": ids}

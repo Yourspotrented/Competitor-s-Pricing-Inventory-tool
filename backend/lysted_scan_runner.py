@@ -213,19 +213,29 @@ def _is_low(check) -> bool:
 
 def _event_context(listing: Dict[str, Any], event_name: Optional[str] = None) -> str:
     """
-    "Usher and Chris Brown · Oct 10, 7:01 PM · Reliant Stadium Parking".
+    "Usher and Chris Brown · Oct 10, 7:01 PM · Reliant Stadium Parking", or
+    "Ayra Starr · Mar 18, 2027, 7:01 PM · House of Blues Houston Parking"
+    when the event isn't this year.
 
     The date is not decoration: the same act plays the same venue on several
     dates, and an alert naming only act and venue can't be matched to a
     listing ("we only have the event and the stadium, but we don't have the
-    date" — Leticia, 2026-09-18).
+    date" — Leticia, 2026-09-18). The year is included whenever it differs
+    from the current one — before this it was always omitted, so a Stagefront
+    listing over a year out (Oct 2026 scan, Mar 2027 event) read identically
+    to one happening the same month this year (found 2026-10-14). Same rule
+    teams_notify._event_when already applies to the sold-out alert lines;
+    this is the low-inventory/price-spike lines' own copy of it.
     """
     raw = listing.get("event_date") or ""
     when = raw
     try:
         dt = datetime.fromisoformat(raw)
-        when = dt.strftime("%b %d") + ("" if (dt.hour, dt.minute) == (0, 0)
-                                       else dt.strftime(", %I:%M %p").replace(" 0", " "))
+        when = dt.strftime("%b %d")
+        if dt.year != datetime.now().year:
+            when += dt.strftime(", %Y")
+        if (dt.hour, dt.minute) != (0, 0):
+            when += dt.strftime(", %I:%M %p").replace(" 0", " ")
     except ValueError:
         pass
     return " · ".join(x for x in (event_name or listing.get("event_name"), when,

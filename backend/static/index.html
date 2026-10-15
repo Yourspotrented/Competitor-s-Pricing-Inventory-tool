@@ -290,6 +290,9 @@
     <input type="password" id="stagefrontToken" class="file-pick" placeholder="Paste Stagefront token…"
            title="Stagefront session token — inventory is then pulled automatically until it expires" />
     <button id="stagefrontTokenBtn">Save Token</button>
+    <input type="password" id="stagefrontCookie" class="file-pick" placeholder="Paste Stagefront session cookie…"
+           title="Browser session cookie — needed only to deactivate (Unshare Everywhere) a sold-out listing, separate from the token above" />
+    <button id="stagefrontCookieBtn">Save Cookie</button>
     <button id="stagefrontRefreshBtn">Refresh</button>
     <button id="stagefrontScanBtn" class="primary">Check Now</button>
   </div>
@@ -309,6 +312,7 @@
 <div id="lystedUploadStatus" class="scan-status-line" style="display:none;"></div>
 <div id="lystedScanStatus" class="scan-status-line" style="display:none;"></div>
 <div id="stagefrontTokenStatus" class="scan-status-line" style="display:none;"></div>
+<div id="stagefrontCookieStatus" class="scan-status-line" style="display:none;"></div>
 <div id="stagefrontScanStatus" class="scan-status-line" style="display:none;"></div>
 
 <div class="view-tabs">
@@ -2445,6 +2449,7 @@ function renderStagefront() {
 
 async function loadStagefront() {
   refreshStagefrontTokenStatus();
+  refreshStagefrontCookieStatus();
   const res = await fetch('/api/stagefront/listings');
   const data = await res.json();
   STAGEFRONT_ROWS = data.listings || [];
@@ -2537,6 +2542,51 @@ $('stagefrontTokenBtn').addEventListener('click', async () => {
     status.textContent = `Token saved — valid for ${data.hours_left}h (until ${fmtCentral(data.expires_at)}). The next scan will pull the inventory itself.`;
   } catch (e) {
     status.textContent = `Could not save the token: ${e.message}`;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+// A separate credential from the token above: deactivating a listing
+// ("Unshare Everywhere") authenticates as a logged-in browser session, not
+// through the read API — see stagefront_api.py. There's no safe way to test
+// whether it still works without actually deactivating something, so this
+// only reports whether one has been pasted, not whether it's valid.
+async function refreshStagefrontCookieStatus() {
+  const el = $('stagefrontCookieStatus');
+  try {
+    const res = await fetch('/api/stagefront/write-cookie-status');
+    const s = await res.json();
+    el.style.display = 'block';
+    if (!s.configured) {
+      el.textContent = 'Stagefront session cookie: none saved — deactivation stays dry-run only until one is pasted.';
+    } else {
+      const when = s.last_saved && s.last_saved.saved_at ? ` (pasted ${fmtCentral(s.last_saved.saved_at)})` : '';
+      el.textContent = `Stagefront session cookie: saved${when} — whether it still works is confirmed on the next deactivation attempt.`;
+    }
+  } catch (e) { el.style.display = 'none'; }
+}
+
+$('stagefrontCookieBtn').addEventListener('click', async () => {
+  const input = $('stagefrontCookie');
+  const status = $('stagefrontCookieStatus');
+  const cookie = input.value.trim();
+  if (!cookie) { alert('Paste the Stagefront session cookie first.'); return; }
+  const btn = $('stagefrontCookieBtn');
+  btn.disabled = true;
+  status.style.display = 'block';
+  status.textContent = 'Saving cookie…';
+  try {
+    const res = await fetch('/api/stagefront/write-cookie', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cookie }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'could not save the cookie');
+    input.value = '';
+    status.textContent = 'Cookie saved — used the next time a listing needs deactivating.';
+  } catch (e) {
+    status.textContent = `Could not save the cookie: ${e.message}`;
   } finally {
     btn.disabled = false;
   }
