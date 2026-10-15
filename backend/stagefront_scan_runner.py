@@ -18,10 +18,23 @@ uses, not a lysted_scan_runner.py change):
     (Item.InHand, carried through as passes_in_hand) — same idea as
     ReachPro's unsold_qty — so that overrides the spare-spots result here too.
 
-Deactivating a Stagefront listing is not implemented — no endpoint has been
-captured yet (see docs/PROJECT_KNOWLEDGE.md). listing_actions.carry_out below
-runs exactly as it does for Lysted/ReachPro and reports "not enabled" unless
-STAGEFRONT_ALLOW_WRITES is set, which it never is yet.
+Deactivation (added 2026-10-14)
+--------------------------------
+Stagefront's decision rule is deliberately stricter than Lysted/ReachPro's:
+a listing is only treated as sold out at source once EVERY checked platform
+(today: SpotHero and ParkWhiz — listing_actions.STAGEFRONT_SOLD_OUT_PLATFORMS,
+extend that tuple for a future platform, nothing else needs to change) reads
+sold_out. A platform that never found the lot doesn't count as agreement —
+see listing_actions.buyable_when_all_sold_out. The underlying keep-vs-
+deactivate call (don't pull a listing we can still cover from our own
+passes_in_hand) is unchanged — same decide(), just given this stricter
+buyability rule instead of the default one.
+
+Actually carrying out a deactivation ("Unshare Everywhere") needs its own
+browser-session cookie, separate from the Bearer token the read side uses
+(stagefront_api.py), and stays off until both STAGEFRONT_ALLOW_WRITES is set
+and that cookie is pasted — same dry-run-by-default posture every platform
+here launched with.
 """
 from __future__ import annotations
 
@@ -92,13 +105,18 @@ def _run_locked(notify: bool, event_limit: Optional[int]) -> Dict[str, Any]:
             a["source"] = SOURCE
             # Unlike Lysted's listing_key (a synthetic event|date|section
             # string), Stagefront's listing_key already IS the real
-            # Listing_ID — carry_out needs it under this name to ever act on
-            # it once a deactivate endpoint exists.
+            # Listing_ID — carry_out needs it under this name to act on it.
             a["stagefront_listing_id"] = a["listing_key"]
             a["passes_secured"] = listing.get("quantity_total")
             a["passes_left"] = in_hand
-            a["decision"] = listing_actions.decide(listing.get("quantity") or a.get("quantity"),
-                                                   in_hand, a.get("platform_detail") or {})
+            a["decision"] = listing_actions.decide(
+                listing.get("quantity") or a.get("quantity"), in_hand, a.get("platform_detail") or {},
+                buyable_fn=listing_actions.buyable_when_all_sold_out,
+            )
+            # Stored directly rather than left to be recomputed later:
+            # /api/actions/pending's fallback logic only knows the
+            # Lysted/ReachPro passes_left-based rule, not this one.
+            a["action"] = a["decision"]["action"]
         spikes = collect_price_spikes(db, listings, scan_started, source=SOURCE)
         low_inventory = detect_low_inventory_crossings(db, listings, scan_started, source=SOURCE)
 
@@ -109,7 +127,10 @@ def _run_locked(notify: bool, event_limit: Optional[int]) -> Dict[str, Any]:
             logger.info("Stagefront deactivations: %d done, %d skipped, %d failed",
                         len(carried["done"]), len(carried["skipped"]), len(carried["failed"]))
             if notify:
-                notify_deactivations(carried["done"], carried["failed"], carried["skipped"], source="Stagefront")
+                # Its own dedicated group, not the Lysted/ReachPro shared
+                # DEACTIVATION_TEAMS_WEBHOOK_URL one (2026-10-14 call).
+                notify_deactivations(carried["done"], carried["failed"], carried["skipped"], source="Stagefront",
+                                     webhook_env_var="STAGEFRONT_DEACTIVATION_TEAMS_WEBHOOK_URL")
 
         if notify:
             sent = notify_lysted_summary(scan_stats(db, listings, scan_started, source=SOURCE), alerts,

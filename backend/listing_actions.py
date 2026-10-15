@@ -71,6 +71,11 @@ def _buyable(platform_detail: Dict[str, Any]) -> Optional[int]:
     None means "no idea" — the lot wasn't found, wasn't checked, or only
     ParkWhiz saw it and ParkWhiz publishes no counts. A listing we know
     nothing about is never touched.
+
+    This is the Lysted/ReachPro rule specifically (SpotHero's exact count
+    decides, ParkWhiz only confirms when SpotHero has nothing). Stagefront
+    uses a different, stricter rule — see buyable_when_all_sold_out below —
+    passed into decide() as buyable_fn rather than forking decide() itself.
     """
     spothero = (platform_detail or {}).get("spothero") or {}
     parkwhiz = (platform_detail or {}).get("parkwhiz") or {}
@@ -86,22 +91,55 @@ def _buyable(platform_detail: Dict[str, Any]) -> Optional[int]:
     return None
 
 
+# Platforms whose agreement decides a Stagefront sell-out (2026-10-14 call).
+# Dynamic on purpose: add a platform here once it's actually being checked,
+# no other code changes needed.
+STAGEFRONT_SOLD_OUT_PLATFORMS = ("spothero", "parkwhiz")
+
+
+def buyable_when_all_sold_out(platform_detail: Dict[str, Any],
+                              platforms: tuple = STAGEFRONT_SOLD_OUT_PLATFORMS) -> Optional[int]:
+    """
+    Stagefront's buyability rule: source counts as sold out only when EVERY
+    platform in `platforms` explicitly read sold_out — not "not found", not
+    "unknown", not merely absent from platform_detail. A platform that never
+    found the lot is not evidence it sold out there, so it blocks the call
+    rather than being read as agreement — same "never act on missing
+    information" rule _buyable follows, just requiring more agreement before
+    concluding "gone" at all.
+
+    Never returns a positive number: unlike _buyable, this doesn't read
+    SpotHero's exact count when something's still available — Stagefront's
+    rule is binary per the team's request (confirmed sold out everywhere
+    checked, or leave it alone), not a quantity to reduce to.
+    """
+    levels = {p: (platform_detail or {}).get(p, {}).get("level") for p in platforms}
+    if all(levels.get(p) == "sold_out" for p in platforms):
+        return 0
+    return None
+
+
 def decide(listing_quantity: Optional[int], passes_left: Optional[int],
-           platform_detail: Dict[str, Any]) -> Dict[str, Any]:
+           platform_detail: Dict[str, Any], buyable_fn=_buyable) -> Dict[str, Any]:
     """
     What should happen to one listing.
 
     Returns {action, target_quantity, passes_in_hand, buyable_at_source,
     reason}. action is KEEP, REDUCE or DEACTIVATE; target_quantity is None
     when we don't know enough to act.
+
+    buyable_fn decides "how many could still be bought at source" — swap it
+    (e.g. buyable_when_all_sold_out) to change what counts as sold out
+    without touching the keep/deactivate logic below, which stays the same
+    for every source: never pull a listing we can still cover ourselves.
     """
     in_hand = passes_left or 0
-    buyable = _buyable(platform_detail)
+    buyable = buyable_fn(platform_detail)
 
     if buyable is None:
         return {"action": KEEP, "target_quantity": None, "passes_in_hand": in_hand,
                 "buyable_at_source": None,
-                "reason": "not listed on SpotHero, so how many are still buyable is unknown"}
+                "reason": "not confirmed sold out at source yet"}
 
     target = in_hand + buyable
     if listing_quantity is None:
@@ -238,6 +276,15 @@ def apply_action(listing: Dict[str, Any], decision: Dict[str, Any],
     if source == "lysted" and decision["action"] == DEACTIVATE:
         from lysted_api import set_broadcast
         result = set_broadcast(listing.get("lysted_listing_id") or "", broadcast=False, dry_run=dry_run)
+        planned.update({"applied": bool(result.get("ok")) and not dry_run,
+                        "dry_run": dry_run, "result": result})
+        if not result.get("ok"):
+            planned["reason"] = result.get("reason")
+        return planned
+
+    if source == "stagefront" and decision["action"] == DEACTIVATE:
+        from stagefront_api import unshare_listings
+        result = unshare_listings([listing.get("stagefront_listing_id") or ""], dry_run=dry_run)
         planned.update({"applied": bool(result.get("ok")) and not dry_run,
                         "dry_run": dry_run, "result": result})
         if not result.get("ok"):

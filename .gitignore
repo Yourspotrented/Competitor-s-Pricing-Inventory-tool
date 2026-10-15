@@ -5,6 +5,7 @@ backend/.env
 .env.*
 !.env.example
 !backend/.env.example
+*.md
 
 # Python virtual environment
 backend/.venv/

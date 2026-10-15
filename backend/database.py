@@ -503,7 +503,7 @@ class LystedSoldOutAlert(Base):
     id = Column(Integer, primary_key=True)
     listing_key = Column(String(400), nullable=False, index=True)
     event_key = Column(String(400), nullable=False, index=True)
-    source = Column(String(20), nullable=True, index=True)       # "lysted" | "reachpro"
+    source = Column(String(20), nullable=True, index=True)       # "lysted" | "reachpro" | "stagefront"
     event_name = Column(String(500), nullable=True)
     event_date = Column(String(50), nullable=True)
     venue = Column(String(500), nullable=True)
@@ -517,6 +517,12 @@ class LystedSoldOutAlert(Base):
     previous_levels = Column(String(100), nullable=True)         # what each platform showed last scan
     passes_secured = Column(Integer, nullable=True)              # passes bought for this listing (spare spots sheet)
     passes_left = Column(Integer, nullable=True)                 # of those, not yet used or cancelled
+    # The decision computed at detection time (listing_actions.decide),
+    # stored rather than recomputed later — Stagefront's rule needs
+    # platform_detail (not stored) to recompute, unlike Lysted/ReachPro's
+    # passes_left-only rule, which /api/actions/pending still recomputes
+    # live when this is NULL (older rows, and every Lysted/ReachPro row).
+    action = Column(String(20), nullable=True)                   # "keep" | "deactivate" | "reduce"
     detected_at = Column(DateTime, default=utcnow, index=True)
     notified = Column(Boolean, default=False)
 
@@ -643,6 +649,7 @@ def create_tables() -> None:
     _ensure_column("lysted_sold_out_alerts", "passes_left", "INTEGER")
     _ensure_column("lysted_sold_out_alerts", "source", "VARCHAR(20)")
     _ensure_column("lysted_sold_out_alerts", "reason", "VARCHAR(30)")
+    _ensure_column("lysted_sold_out_alerts", "action", "VARCHAR(20)")
     _ensure_column("lysted_listings", "lysted_listing_id", "VARCHAR(30)")
 
 
