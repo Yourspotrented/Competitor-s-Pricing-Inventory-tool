@@ -9,7 +9,7 @@ from typing import Optional
 
 from fastapi import Body, FastAPI, Depends, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.responses import FileResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -1615,6 +1615,170 @@ def stagefront_scan_status():
 @app.get("/api/stagefront/scheduler-status")
 def stagefront_scheduler_status():
     return get_stagefront_scheduler_status()
+
+
+@app.get("/api/stagefront/sold-out-alerts/csv")
+def stagefront_sold_out_alerts_csv(
+    latest_run_only: bool = Query(False),
+    limit: int = Query(1000, le=5000),
+    db: Session = Depends(get_db),
+):
+    """
+    Export Stagefront sold-out alerts as a downloadable CSV.
+    If latest_run_only is true but the latest scan had no alerts,
+    falls back to all Stagefront alerts so a useful file is always exported.
+    """
+    import csv
+    import io
+    from datetime import datetime
+
+    q = db.query(LystedSoldOutAlert).filter(LystedSoldOutAlert.source == "stagefront")
+    if latest_run_only:
+        q_latest = _only_latest_run(q, LystedSoldOutAlert)
+        rows = q_latest.order_by(LystedSoldOutAlert.detected_at.desc()).limit(limit).all()
+        if not rows:
+            rows = q.order_by(LystedSoldOutAlert.detected_at.desc()).limit(limit).all()
+    else:
+        rows = q.order_by(LystedSoldOutAlert.detected_at.desc()).limit(limit).all()
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        "Listing ID",
+        "Event Name",
+        "Event Date",
+        "Venue",
+        "City",
+        "State",
+        "Section / Lot",
+        "Sold Out Platforms",
+        "Listed Qty",
+        "List Price",
+        "Passes In Hand",
+        "Passes Secured",
+        "Previous Status",
+        "Teams Notified",
+        "Detected At (UTC)",
+    ])
+    for r in rows:
+        writer.writerow([
+            r.listing_key or "",
+            r.event_name or "",
+            r.event_date or "",
+            r.venue or "",
+            r.city or "",
+            r.state or "",
+            r.section or "",
+            r.platforms or "",
+            r.quantity if r.quantity is not None else "",
+            f"${r.list_price:.2f}" if r.list_price is not None else "",
+            r.passes_left if r.passes_left is not None else "",
+            r.passes_secured if r.passes_secured is not None else "",
+            r.previous_levels or "",
+            "Yes" if r.notified else "No",
+            r.detected_at.isoformat() if r.detected_at else "",
+        ])
+
+    csv_content = output.getvalue()
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    filename = f"stagefront-sold-out-alerts-{today_str}.csv"
+    return Response(
+        content=csv_content,
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-cache",
+        },
+    )
+
+
+@app.post("/api/stagefront/upload")
+async def stagefront_upload(file: UploadFile = File(...)):
+    """
+    Upload a Stagefront inventory export (CSV). Becomes the current active
+    listing set; the previous sync is kept as history.
+    """
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="The uploaded file is empty.")
+    try:
+        from stagefront_listings import save_upload as save_stagefront_upload
+        return save_stagefront_upload(file.filename or "stagefront-export.csv", content)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/api/stagefront/inventory/csv")
+def stagefront_inventory_csv(
+    active_only: bool = Query(False),
+    db: Session = Depends(get_db),
+):
+    """
+    Export current Stagefront inventory listings as a downloadable CSV.
+    """
+    import csv
+    import io
+    from datetime import datetime
+
+    sync = get_latest_stagefront_sync(db)
+    if sync is None:
+        raise HTTPException(status_code=404, detail="No Stagefront inventory synced or uploaded yet.")
+
+    q = db.query(StagefrontListing).filter(StagefrontListing.sync_id == sync.id)
+    if active_only:
+        q = q.filter(StagefrontListing.is_active == True)  # noqa: E712
+    rows = q.order_by(StagefrontListing.event_date, StagefrontListing.event_name).all()
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        "Listing ID",
+        "Event ID",
+        "Event Name",
+        "Event Date",
+        "Event Time",
+        "Venue",
+        "City",
+        "State",
+        "Section",
+        "Row",
+        "Quantity",
+        "Status",
+        "List Price",
+        "Passes In Hand",
+        "Total Quantity",
+    ])
+    for r in rows:
+        writer.writerow([
+            r.stagefront_listing_id or "",
+            r.stagefront_event_id or "",
+            r.event_name_raw or r.event_name or "",
+            r.event_date or "",
+            r.event_time or "",
+            r.venue or "",
+            r.city or "",
+            r.state or "",
+            r.section_raw or r.section or "",
+            r.row or "",
+            r.quantity if r.quantity is not None else "",
+            "ACTIVE" if r.is_active else "INACTIVE",
+            f"${r.price:.2f}" if r.price is not None else "",
+            r.passes_in_hand if r.passes_in_hand is not None else "",
+            r.quantity_total if r.quantity_total is not None else "",
+        ])
+
+    csv_content = output.getvalue()
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    filename = f"stagefront-inventory-{today_str}.csv"
+    return Response(
+        content=csv_content,
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-cache",
+        },
+    )
+
 
 
 # --- ReachPro: the same sold-out flow against our ReachPro listings ---------

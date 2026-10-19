@@ -293,6 +293,8 @@
     <input type="password" id="stagefrontCookie" class="file-pick" placeholder="Paste Stagefront session cookie…"
            title="Browser session cookie — needed only to deactivate (Unshare Everywhere) a sold-out listing, separate from the token above" />
     <button id="stagefrontCookieBtn">Save Cookie</button>
+    <input type="file" id="stagefrontFile" class="file-pick" accept=".csv,text/csv" title="Stagefront inventory export (.csv) — manual fallback" />
+    <button id="stagefrontUploadBtn">Upload Export</button>
     <button id="stagefrontRefreshBtn">Refresh</button>
     <button id="stagefrontScanBtn" class="primary">Check Now</button>
   </div>
@@ -313,6 +315,7 @@
 <div id="lystedScanStatus" class="scan-status-line" style="display:none;"></div>
 <div id="stagefrontTokenStatus" class="scan-status-line" style="display:none;"></div>
 <div id="stagefrontCookieStatus" class="scan-status-line" style="display:none;"></div>
+<div id="stagefrontUploadStatus" class="scan-status-line" style="display:none;"></div>
 <div id="stagefrontScanStatus" class="scan-status-line" style="display:none;"></div>
 
 <div class="view-tabs">
@@ -536,6 +539,10 @@
       <button class="facility-filter-btn stagefront-filter-btn" data-filter="limited">Limited</button>
       <button class="facility-filter-btn stagefront-filter-btn" data-filter="not_found">Not found</button>
       <button class="facility-filter-btn stagefront-filter-btn" data-filter="unchecked">Not checked</button>
+      <button id="stagefrontExportInventoryBtn" style="margin-left:auto; font-size:12px; padding:6px 14px; cursor:pointer; display:inline-flex; align-items:center; gap:6px;">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        Export Inventory to CSV
+      </button>
     </div>
     <div style="padding: 12px 28px 0;">
       <div id="stagefrontCaption" class="sub" style="margin-bottom:10px;"></div>
@@ -552,7 +559,13 @@
   </div>
 
   <div id="stagefrontAlertsSubview" style="display:none; padding: 16px 28px;">
-    <div id="stagefrontAlertsCaption" class="sub" style="margin-bottom:10px;"></div>
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; flex-wrap:wrap; gap:10px;">
+      <div id="stagefrontAlertsCaption" class="sub" style="margin-bottom:0;"></div>
+      <button id="stagefrontExportAlertsBtn" style="font-size:12px; padding:6px 14px; cursor:pointer; display:inline-flex; align-items:center; gap:6px;">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        Export Alerts to CSV
+      </button>
+    </div>
     <div class="tbl-shell">
       <table>
         <thead>
@@ -2492,6 +2505,89 @@ function switchStagefrontSubview(view) {
 }
 $('viewStagefrontListBtn').addEventListener('click', () => switchStagefrontSubview('list'));
 $('viewStagefrontAlertsBtn').addEventListener('click', () => switchStagefrontSubview('alerts'));
+
+$('stagefrontExportAlertsBtn').addEventListener('click', async () => {
+  const btn = $('stagefrontExportAlertsBtn');
+  const originalHtml = btn.innerHTML;
+  btn.disabled = true;
+  btn.textContent = 'Exporting…';
+  try {
+    const res = await fetch('/api/stagefront/sold-out-alerts/csv?latest_run_only=true');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const blob = await res.blob();
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const now = new Date().toISOString().slice(0, 10);
+    a.download = `stagefront-sold-out-alerts-${now}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    window.URL.revokeObjectURL(url);
+  } catch (err) {
+    alert(`Could not export alerts: ${err.message}`);
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = originalHtml;
+  }
+});
+
+$('stagefrontExportInventoryBtn').addEventListener('click', async () => {
+  const btn = $('stagefrontExportInventoryBtn');
+  const originalHtml = btn.innerHTML;
+  btn.disabled = true;
+  btn.textContent = 'Exporting…';
+  try {
+    const res = await fetch('/api/stagefront/inventory/csv');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const blob = await res.blob();
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const now = new Date().toISOString().slice(0, 10);
+    a.download = `stagefront-inventory-${now}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    window.URL.revokeObjectURL(url);
+  } catch (err) {
+    alert(`Could not export inventory: ${err.message}`);
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = originalHtml;
+  }
+});
+
+$('stagefrontUploadBtn').addEventListener('click', async () => {
+  const input = $('stagefrontFile');
+  const status = $('stagefrontUploadStatus');
+  status.style.display = 'flex';
+  if (!input.files || !input.files.length) {
+    status.innerHTML = `<span class="badge limited">Choose a file</span> Pick the Stagefront CSV export, then click Upload Export.`;
+    return;
+  }
+  const btn = $('stagefrontUploadBtn');
+  btn.disabled = true; btn.textContent = 'Uploading…';
+  status.innerHTML = `<span class="spinner"></span> Uploading ${input.files[0].name}…`;
+  try {
+    const fd = new FormData();
+    fd.append('file', input.files[0]);
+    const res = await fetch('/api/stagefront/upload', { method: 'POST', body: fd });
+    const data = await res.json();
+    if (!res.ok) {
+      status.innerHTML = `<span class="badge sold_out">Not accepted</span> ${data.detail || 'upload failed'}`;
+    } else {
+      const warn = (data.warnings || []).length ? ` · ${data.warnings.length} warning(s): ${data.warnings[0]}${data.warnings.length > 1 ? ' …' : ''}` : '';
+      status.innerHTML = `Uploaded ${data.filename}: <strong>${data.active_count}</strong> live listing(s) of ${data.listing_count} rows (${data.skipped_count} inactive, skipped)${warn}. Click "Check Now" to check them against the buying platforms.`;
+      input.value = '';
+      loadStagefront();
+    }
+  } catch (e) {
+    status.innerHTML = `<span class="badge sold_out">Failed</span> ${e.message || e}`;
+  } finally {
+    btn.disabled = false; btn.textContent = 'Upload Export';
+  }
+});
 
 $('stagefrontListSubview').querySelectorAll('.stagefront-filter-btn').forEach(btn => {
   btn.addEventListener('click', () => {

@@ -25,7 +25,8 @@ from teams_notify import notify_deactivations, notify_lysted_summary
 
 logger = logging.getLogger(__name__)
 
-LYSTED_DEFAULT_INTERVAL_HOURS = 3.0   # Chibuikem: "every three hours or every six" — start at the tighter one
+LYSTED_DEFAULT_INTERVAL_HOURS = 1.0   # Was 3h (Chibuikem: "every three hours or every six"); moved to hourly
+                                      # 2026-10-19 to catch sold-outs faster, matching Facility/Events' cadence.
 PLATFORMS = ("spothero", "parkwhiz")
 
 # Same threshold the facility flow uses (facility_scan_runner), so "running
@@ -157,7 +158,7 @@ def detect_day_before_deactivations(db, listings: List[Dict[str, Any]], scan_sta
     Listings whose event is close enough that the team's routine says to take
     them down now.
 
-    Reported once per listing, not every three hours: an alert row with
+    Reported once per listing, not every scan: an alert row with
     reason="day_before_event" already present for that listing means it has
     been raised, whether or not anyone acted on it.
     """

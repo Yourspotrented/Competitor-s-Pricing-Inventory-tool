@@ -31,16 +31,25 @@ stagefront_scan_runner.py for where this overrides the spare-spots result.
 """
 from __future__ import annotations
 
+import csv
+import hashlib
+import io
 import logging
 import re
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from database import StagefrontListing, StagefrontSync, create_tables, get_session
 
 logger = logging.getLogger(__name__)
 
 SOURCE = "stagefront"
+
+_DATE_FORMATS = (
+    "%Y-%m-%d %I:%M%p", "%Y-%m-%d %I:%M %p", "%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S",
+    "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d",
+    "%m/%d/%Y %I:%M%p", "%m/%d/%Y %I:%M %p", "%m/%d/%Y %H:%M", "%m/%d/%Y",
+)
 
 
 def clean_event_name(name: str) -> str:
@@ -238,3 +247,183 @@ def load_active_listings(db=None) -> List[Dict[str, Any]]:
     finally:
         if own:
             db.close()
+
+
+def _parse_csv_date(raw: Optional[str]) -> Optional[str]:
+    s = (raw or "").strip()
+    if not s:
+        return None
+    for fmt in _DATE_FORMATS:
+        try:
+            return datetime.strptime(s.upper(), fmt).strftime("%Y-%m-%dT%H:%M:%S")
+        except ValueError:
+            continue
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00")).replace(tzinfo=None).strftime("%Y-%m-%dT%H:%M:%S")
+    except Exception:
+        return s[:19] if len(s) >= 10 else None
+
+
+def _to_float(v: Any) -> Optional[float]:
+    try:
+        s = str(v).replace("$", "").replace(",", "").strip()
+        return float(s) if s and s.upper() != "N/A" else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_int(v: Any) -> Optional[int]:
+    f = _to_float(v)
+    return int(f) if f is not None else None
+
+
+def _norm(s: Optional[str]) -> str:
+    return re.sub(r"\s+", " ", (s or "").strip()).lower()
+
+
+def _stable_id(prefix: str, *parts: str) -> str:
+    """
+    A deterministic id for a CSV row with no Listing/Event ID column of its
+    own — the same (event, date, section) always produces the same id.
+
+    This replaces an earlier version that used Python's built-in hash():
+    str/tuple hashing is randomized per-process by default (a security
+    feature since Python 3.3), so the exact same row produced a different
+    "stable" id on every server restart — confirmed by running the same
+    input through three separate processes and getting three different
+    numbers (2026-10-14). That silently broke identity for any CSV-uploaded
+    listing without its own id: the sold-out-crossing detector compares a
+    listing's reading against its PREVIOUS reading by this key, so a changed
+    key after every restart makes every listing look brand new, the same
+    failure lysted_listings.make_keys was written to avoid.
+
+    SHA-256 of the normalized, pipe-joined parts is used instead — stable
+    across restarts and processes. Truncated to 16 hex chars so the id still
+    fits comfortably inside stagefront_listing_id's VARCHAR(50) alongside
+    the prefix, not because 16 chars of SHA-256 needs to be cryptographically
+    unique here (collisions are not a security concern for this use).
+    """
+    key = "|".join(_norm(p) for p in parts)
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
+    return f"{prefix}_{digest}"
+
+
+def _extract_val(row: Dict[str, Any], *aliases: str) -> str:
+    for a in aliases:
+        if a in row and row[a] is not None:
+            v = str(row[a]).strip()
+            if v:
+                return v
+    lower_map = {str(k).strip().lower(): k for k in row.keys() if k is not None}
+    for a in aliases:
+        lk = a.strip().lower()
+        if lk in lower_map and row[lower_map[lk]] is not None:
+            v = str(row[lower_map[lk]]).strip()
+            if v:
+                return v
+    return ""
+
+
+def parse_stagefront_csv(content: bytes | str) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """
+    Parse a Stagefront inventory export (CSV) into normalized row dicts ready for StagefrontListing.
+    Accepts both this system's exported Stagefront CSV and Lysted-format CSVs.
+    """
+    text = content.decode("utf-8-sig") if isinstance(content, bytes) else content
+    reader = csv.DictReader(io.StringIO(text, newline=""))
+    fieldnames = [str(h).strip() for h in (reader.fieldnames or [])]
+    if not fieldnames:
+        raise ValueError("Uploaded CSV is empty or has no header.")
+
+    rows: List[Dict[str, Any]] = []
+    warnings: List[str] = []
+
+    for i, raw in enumerate(reader, start=2):
+        event_name_raw = _extract_val(raw, "Event Name", "Event", "Event Name Raw", "Event_Name", "event_name")
+        section_raw = _extract_val(raw, "Section", "Lot", "Section / Lot", "Lot / Section", "section", "section_raw")
+        if not event_name_raw and not section_raw:
+            continue
+        if not event_name_raw or not section_raw:
+            warnings.append(f"Line {i}: Missing event name or section/lot — skipped.")
+            continue
+
+        date_raw = _extract_val(raw, "Event Date", "Date", "Event_Date", "event_date")
+        time_raw = _extract_val(raw, "Event Time", "Time", "Event_Time", "event_time")
+        date_iso = _parse_csv_date(date_raw)
+        if time_raw and date_iso and "T00:00:00" in date_iso:
+            date_iso = _combine_date_time(date_iso, time_raw) or date_iso
+
+        venue = _extract_val(raw, "Venue", "Venue Name", "Venue_Name", "venue")
+        city = _extract_val(raw, "City", "Venue City", "Venue_City", "city")
+        state = _extract_val(raw, "State", "Venue State", "Venue_State", "state", "Region", "region")
+        row_str = _extract_val(raw, "Row", "row")
+
+        qty_val = _to_int(_extract_val(raw, "Quantity", "Qty", "Open Passes", "open_passes", "quantity"))
+        total_qty_val = _to_int(_extract_val(raw, "Total Quantity", "quantity_total", "Total Qty", "Total"))
+        in_hand_val = _to_int(_extract_val(raw, "Passes In Hand", "passes_in_hand", "InHand", "In Hand", "Inhand"))
+        price_val = _to_float(_extract_val(raw, "List Price", "List", "Price", "Item_Price", "Item Price", "price"))
+
+        listing_id = _extract_val(raw, "Listing ID", "stagefront_listing_id", "Listing_ID", "listing_id", "Item_ID")
+        event_id = _extract_val(raw, "Event ID", "stagefront_event_id", "Event_ID", "event_id")
+
+        if not listing_id:
+            listing_id = _stable_id("sfcsv", event_name_raw, date_iso or date_raw, section_raw)
+        if not event_id:
+            event_id = _stable_id("sfcsvev", event_name_raw, date_iso or date_raw, venue)
+
+        status_str = _extract_val(raw, "Status", "status").upper()
+        broadcast_str = _extract_val(raw, "Broadcast", "broadcast").upper()
+        
+        is_active = True
+        if status_str in ("READY", "INACTIVE", "COMPLETED", "DELETED"):
+            is_active = False
+        elif broadcast_str in ("N", "NO", "FALSE", "0"):
+            is_active = False
+        elif qty_val is not None and qty_val <= 0:
+            is_active = False
+
+        rows.append({
+            "stagefront_listing_id": listing_id,
+            "stagefront_event_id": event_id,
+            "is_active": is_active,
+            "quantity": qty_val if qty_val is not None else 1,
+            "quantity_total": total_qty_val if total_qty_val is not None else (qty_val if qty_val is not None else 1),
+            "passes_in_hand": in_hand_val if in_hand_val is not None else 0,
+            "event_name": clean_event_name(event_name_raw),
+            "event_name_raw": event_name_raw,
+            "event_date": date_iso or date_raw,
+            "event_time": time_raw or None,
+            "venue": venue or None,
+            "city": city or None,
+            "state": state or None,
+            "cat_desc": None,
+            "section": clean_section(section_raw),
+            "section_raw": section_raw,
+            "row": row_str or None,
+            "item_status_id": None,
+            "price": price_val,
+        })
+
+    if not rows and not warnings:
+        raise ValueError("Not a recognizable inventory CSV. Required columns: Event Name, Section/Lot, Event Date.")
+
+    return rows, warnings
+
+
+def save_upload(filename: str, content: bytes | str) -> Dict[str, Any]:
+    """Parse and persist one Stagefront CSV export. Returns summary for UI."""
+    rows, warnings = parse_stagefront_csv(content)
+    if not rows:
+        raise ValueError("No valid inventory rows found in CSV.")
+    unique_events = {r["stagefront_event_id"] for r in rows}
+    summary = save_sync(rows, len(unique_events))
+    return {
+        "status": "uploaded",
+        "filename": filename,
+        "sync_id": summary["sync_id"],
+        "synced_at": summary["synced_at"],
+        "listing_count": summary["listing_count"],
+        "active_count": summary["active_count"],
+        "skipped_count": summary["listing_count"] - summary["active_count"],
+        "warnings": warnings,
+    }

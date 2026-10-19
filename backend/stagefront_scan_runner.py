@@ -53,7 +53,7 @@ from teams_notify import notify_deactivations, notify_lysted_summary
 
 logger = logging.getLogger(__name__)
 
-STAGEFRONT_DEFAULT_INTERVAL_HOURS = 3.0   # same cadence as Lysted — same kind of flow, no reason to run it differently yet
+STAGEFRONT_DEFAULT_INTERVAL_HOURS = 1.0   # same cadence as Lysted (moved to hourly 2026-10-19)
 
 _scan_lock = threading.Lock()
 

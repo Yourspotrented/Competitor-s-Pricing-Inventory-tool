@@ -4,7 +4,7 @@ import os
 from datetime import datetime, timezone
 
 from sqlalchemy import (
-    Boolean, Column, DateTime, Float, Integer, String, create_engine
+    Boolean, Column, DateTime, Float, Integer, String, create_engine, event
 )
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 
@@ -15,7 +15,18 @@ except ImportError:
     pass
 
 _DB_PATH = os.getenv("DATABASE_PATH", "./scarcity.db")
-_ENGINE = create_engine(f"sqlite:///{_DB_PATH}", connect_args={"check_same_thread": False})
+_ENGINE = create_engine(
+    f"sqlite:///{_DB_PATH}",
+    connect_args={"check_same_thread": False, "timeout": 30.0},
+)
+
+@event.listens_for(_ENGINE, "connect")
+def _set_sqlite_pragma(dbapi_connection, connection_record):
+    cursor = dbapi_connection.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA synchronous=NORMAL")
+    cursor.close()
+
 _SessionFactory = sessionmaker(bind=_ENGINE, autocommit=False, autoflush=False)
 
 Base = declarative_base()

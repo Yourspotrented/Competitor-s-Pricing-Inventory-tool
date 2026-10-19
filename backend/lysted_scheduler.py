@@ -1,7 +1,7 @@
 """
 Background scheduler for the Lysted flow — same shape as
 facility_scheduler.py / events_scheduler.py. Reruns
-run_and_persist_lysted_scan on a fixed interval (default every 3 hours, via
+run_and_persist_lysted_scan on a fixed interval (default every hour, via
 LYSTED_SCAN_INTERVAL_HOURS in .env). A no-op until an export has been
 uploaded.
 

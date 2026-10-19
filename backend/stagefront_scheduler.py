@@ -1,7 +1,7 @@
 """
 Background scheduler for the Stagefront flow — same shape as
 lysted_scheduler.py / facility_scheduler.py / events_scheduler.py. Reruns
-run_and_persist_stagefront_scan on a fixed interval (default every 3 hours,
+run_and_persist_stagefront_scan on a fixed interval (default every hour,
 via STAGEFRONT_SCAN_INTERVAL_HOURS in .env). A no-op until a sync succeeds.
 
 Both this scheduler and lysted_scheduler.py call orchestrator.run_scan,
