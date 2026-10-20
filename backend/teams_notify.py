@@ -208,11 +208,20 @@ def _low_text(a: Dict[str, Any]) -> str:
 
 
 def _platform_state(detail: Dict[str, Any], platform: str) -> str:
-    """"sold out (0 of 25 left)", "available (12 left)", "not listed"."""
+    """"sold out (0 of 25 left)", "available (12 left)", "not listed", "status unclear"."""
     d = (detail or {}).get(platform) or {}
     level, spots, capacity = d.get("level"), d.get("spots_left"), d.get("capacity")
-    if level in (None, "unknown"):
+    if level is None:
         return "not checked"
+    if level == "unknown":
+        # Checked, but the reading came back with neither a count nor a
+        # recognized status word — different from never having checked at
+        # all. Both used to show as "not checked", which read as "we never
+        # looked" when really "we looked and couldn't make sense of it" —
+        # found 2026-10-20 on a ParkWhiz quote (Calvin Harris / Lombard
+        # Garage) that had no space_availability status but also no error,
+        # which this label now makes visible instead of hiding.
+        return "status unclear"
     if level == "not_found":
         return "not listed"
     words = {"sold_out": "sold out", "limited": "running low", "ok": "available"}
@@ -257,14 +266,23 @@ def _sold_out_text(a: Dict[str, Any]) -> str:
 
 
 def _action_text(decision: Dict[str, Any], quantity: Optional[int]) -> str:
-    """"reduce 15 → 10 passes" / "deactivate" / "no change" — the instruction."""
+    """"reduce 15 → 10 passes" / "deactivate" / "no change" — the instruction.
+
+    "keep" covers several different reasons (sold out but covered by our own
+    passes; not yet confirmed sold out everywhere; quantity unknown; still
+    available at source) — decide() already names which one in `reason`, so
+    that's shown here instead of a single fixed sentence that was only true
+    for one of those cases (found 2026-10-20: a Stagefront "keep" with
+    passes_left=0 claiming "we can still fulfil this listing" when the real
+    reason was "not confirmed sold out at source yet").
+    """
     action = decision.get("action")
     target = decision.get("target_quantity")
     if action == "deactivate":
         return "deactivate — nothing left to fulfil it"
     if action == "reduce":
         return f"reduce {quantity} → {target} passes ({decision.get('reason', '')})"
-    return "no change — we can still fulfil this listing"
+    return f"no change — {decision.get('reason') or 'can still fulfil this listing'}"
 
 
 def _secured_text(a: Dict[str, Any]) -> str:
@@ -272,6 +290,11 @@ def _secured_text(a: Dict[str, Any]) -> str:
     if total is None:
         return "none recorded"
     if not left:
+        if (a.get("source") or "").lower() == "stagefront":
+            # Stagefront's passes_left is Item.InHand — a live native count,
+            # not a Lysted-style tally of consumed/cancelled sales — so 0
+            # means "none in hand right now", not "all used or cancelled".
+            return f"0 of {total} in hand"
         return f"all {total} used or cancelled"
     return f"yes, {left} of {total} left"
 
@@ -469,7 +492,11 @@ def notify_lysted_summary(stats: Dict[str, int], sold_out: List[Dict[str, Any]],
         body.append(_section("✂️ Reduce the listed quantity to what we can fulfil"))
         body += _lines(reduce_to, _sold_out_text, MAX_SOLD_OUT_LINES)
     if keep:
-        body.append(_section("✅ Sold out at source — our passes still cover the listing"))
+        # Not always "sold out but covered" — can also be "not confirmed
+        # sold out everywhere yet" (Stagefront) or "still available at
+        # source". Each line's own Action text (_action_text) names the
+        # real reason; this header stays neutral rather than asserting one.
+        body.append(_section("✅ No action needed"))
         body += _lines(keep, _sold_out_text, MAX_SOLD_OUT_LINES)
     if day_before:
         body.append(_section("🗓️ Event is tomorrow — deactivate as usual"))

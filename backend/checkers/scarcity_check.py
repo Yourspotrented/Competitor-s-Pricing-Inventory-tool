@@ -201,13 +201,13 @@ _LOT_STOPWORDS = {
 }
 
 
-def _lot_tokens(text: str) -> set:
+def _lot_tokens(text: str, exclude: frozenset = frozenset()) -> set:
     """Distinctive words in a lot name — the ones that actually identify it."""
     words = re.findall(r"[a-z]{4,}", text.lower())
-    return {w for w in words if w not in _LOT_STOPWORDS}
+    return {w for w in words if w not in _LOT_STOPWORDS and w not in exclude}
 
 
-def _lot_name_matches(our: str, candidate: str) -> bool:
+def _lot_name_matches(our: str, candidate: str, exclude: frozenset = frozenset()) -> bool:
     """
     Last-resort name match for lots that share a name but not a string.
 
@@ -220,8 +220,15 @@ def _lot_name_matches(our: str, candidate: str) -> bool:
     Deliberately strict: generic parking vocabulary is excluded, and a single
     shared word has to be at least six characters, so "Plaza Garage" cannot
     claim "Plaza Tower and Courtyard Shops Garage".
+
+    `exclude` lets a caller rule out words that carry no distinguishing power
+    in its context — see _best_pw_venue_in_place, which passes the city name:
+    "Fillmore Minneapolis Parking" matched ParkWhiz's unrelated "Minneapolis
+    13.1 Marathon" venue on "minneapolis" alone, a single shared word of 11
+    characters. Every venue in a city-filtered candidate list already shares
+    the city name, so it can never be what makes one the right match.
     """
-    ours, theirs = _lot_tokens(our), _lot_tokens(candidate)
+    ours, theirs = _lot_tokens(our, exclude), _lot_tokens(candidate, exclude)
     if not ours or not theirs:
         return False
     shared = {o for o in ours for t in theirs
@@ -1174,8 +1181,9 @@ def _best_pw_venue_in_place(our_venue: str, norm_v: str, venues: list,
                 best_score, best_id = score, v["id"]
     if best_id is not None:
         return best_id
+    city_tokens = frozenset(re.findall(r"[a-z]{4,}", (city or "").lower()))
     for v in local:
-        if _lot_name_matches(our_venue, v.get("name", "")):
+        if _lot_name_matches(our_venue, v.get("name", ""), exclude=city_tokens):
             return v["id"]
     return None
 
@@ -1345,8 +1353,20 @@ def _fetch_parkwhiz_lots(event_name: str, event_date: str, event_venue: str, our
     coords = _geocode_venue(event_venue, our_section, city, state) \
         or _geocode_our_lot(our_section, city, state)
     pw_event_id = _find_parkwhiz_event_id(event_name, event_date, event_venue, coords, city, state)
-    if pw_event_id is None:
+    if pw_event_id is None and coords is None:
+        # No event match and nowhere to anchor a bounds search either —
+        # nothing left to try.
         return [], "event not found on ParkWhiz"
+    # A missed event_id alone is not the end of the road: ParkWhiz's own venue
+    # directory has 400k+ entries with no name search, paginated in no
+    # particular city/alphabetical order, so a venue lookup can legitimately
+    # miss a real venue ("The Fillmore - Minneapolis" sat past page 4,000).
+    # The quotes endpoint takes a plain coordinate bounds box without needing
+    # an event_id — same call the facility-portfolio flow already relies on
+    # (fetch_parkwhiz_lots_near) — so fall through and let the box, not the
+    # event match, decide what is nearby. Confirmed live: this found "Nordic
+    # Parking Ramp" at 728 N. 3rd St. for an event whose venue/event lookup
+    # both came up empty.
 
     # The event_id already pins the event; the coordinates only set the search
     # bounds (~2km). Centring them on our own lot is what brings a lot a mile
@@ -1417,7 +1437,14 @@ def _check_parkwhiz(event_name: str, event_date: str, event_venue: str, our_sect
                 "error": "no lot quotes returned"}
 
     def _level(status: str) -> str:
-        return {"available": "ok", "limited": "limited", "sold_out": "sold_out"}.get(status, "unknown")
+        # "unavailable" is ParkWhiz's status word for event-specific bookable
+        # inventory that's sold out — confirmed 2026-10-20 against a live quote
+        # (Calvin Harris / Lombard Garage) that had space_availability.status
+        # "unavailable" with a $0.00/epoch-timestamp purchase option, i.e. no
+        # real advance-booking slot left. Distinct from "sold_out" only in
+        # wording, not meaning.
+        return {"available": "ok", "limited": "limited", "sold_out": "sold_out",
+                "unavailable": "sold_out"}.get(status, "unknown")
 
     is_generic = _is_generic_section(our_section)
     if not is_generic:
@@ -1437,8 +1464,15 @@ def _check_parkwhiz(event_name: str, event_date: str, event_venue: str, our_sect
                 l = _pick_our_pw_lot(retry, our_section, our_coords)
 
         if l is not None:
-            return {**base, "is_available": l["status"] != "sold_out", "price": l["price"],
-                    "availability_status": l["status"], "scarcity_level": _level(l["status"])}
+            level = _level(l["status"])
+            # Compare the mapped level, not the raw status word — "unavailable"
+            # (ParkWhiz's own sold-out wording) maps to scarcity_level
+            # "sold_out" but isn't literally the string "sold_out", so
+            # comparing against the raw word here said is_available=True for
+            # a lot the scarcity_level right next to it called sold out
+            # (found 2026-10-20 testing the "unavailable" fix above).
+            return {**base, "is_available": level != "sold_out", "price": l["price"],
+                    "availability_status": l["status"], "scarcity_level": level}
         # Other lots exist for this event but not our specific lot.
         return {**base, "is_available": False, "scarcity_level": "not_found",
                 "error": "our lot not found among ParkWhiz quotes"}
@@ -1459,7 +1493,10 @@ def list_parkwhiz_lots(event_name: str, event_date: str, event_venue: str, our_s
         return []
 
     def _level(status: str) -> str:
-        return {"available": "ok", "limited": "limited", "sold_out": "sold_out"}.get(status, "unknown")
+        # See the matching note in _check_parkwhiz: "unavailable" is ParkWhiz's
+        # own status word for sold-out event inventory, not a separate state.
+        return {"available": "ok", "limited": "limited", "sold_out": "sold_out",
+                "unavailable": "sold_out"}.get(status, "unknown")
 
     result = []
     for l in lots:
