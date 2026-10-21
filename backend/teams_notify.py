@@ -223,7 +223,13 @@ def _platform_state(detail: Dict[str, Any], platform: str) -> str:
         # which this label now makes visible instead of hiding.
         return "status unclear"
     if level == "not_found":
-        return "not listed"
+        # "not listed" read as "this platform has nothing for this event" —
+        # a Stagefront listing's event genuinely had SpotHero parking, just
+        # not this specific lot among it, and "not listed" was misread as
+        # the platform itself missing (David Bisbal / Cindy Lot, 2026-10-21).
+        # not_found always means "we looked, our lot specifically wasn't
+        # among what came back" — never "this platform has no event here".
+        return "our lot not found here"
     words = {"sold_out": "sold out", "limited": "running low", "ok": "available"}
     text = words.get(level, level)
     if spots is not None:

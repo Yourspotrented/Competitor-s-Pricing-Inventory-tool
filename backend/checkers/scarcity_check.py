@@ -198,6 +198,12 @@ _LOT_STOPWORDS = {
     "covered", "uncovered", "north", "south", "east", "west", "street", "avenue",
     "center", "centre", "only", "spot", "spots", "from", "venue", "away", "miles",
     "mile", "the", "and", "inn", "hotel", "suites", "plaza", "tower", "shops",
+    # Street-type words, same vocabulary as _STREET_NOISE below — "street"
+    # and "avenue" were already here, but "boulevard" etc. were not, so
+    # "Blvd" alone could count as a second shared word and tip a name match
+    # that a common street-type suffix shouldn't be able to tip on its own.
+    "boulevard", "blvd", "drive", "road", "lane", "court", "place",
+    "parkway", "pkwy", "highway",
 }
 
 
@@ -207,7 +213,22 @@ def _lot_tokens(text: str, exclude: frozenset = frozenset()) -> set:
     return {w for w in words if w not in _LOT_STOPWORDS and w not in exclude}
 
 
-def _lot_name_matches(our: str, candidate: str, exclude: frozenset = frozenset()) -> bool:
+_ADDR_NUM_DIR = re.compile(r"^(\d+)([nsew])?")
+
+
+def _address_lead(text: str) -> Optional[re.Match]:
+    """The house number (and compass direction right after it, if any) at the
+    start of an address-shaped string, via the same normalization
+    _section_matches uses — "150 E Central Blvd." -> number "150", dir "e".
+    None when the string doesn't open with a number (a named venue, not a
+    street address), which is the signal that lets the number/direction
+    check below stay out of the way of the name-only matches it isn't for.
+    """
+    return _ADDR_NUM_DIR.match(_normalize_addr(text))
+
+
+def _lot_name_matches(our: str, candidate: str, exclude: frozenset = frozenset(),
+                      candidate_address: str = "") -> bool:
     """
     Last-resort name match for lots that share a name but not a string.
 
@@ -227,15 +248,44 @@ def _lot_name_matches(our: str, candidate: str, exclude: frozenset = frozenset()
     13.1 Marathon" venue on "minneapolis" alone, a single shared word of 11
     characters. Every venue in a city-filtered candidate list already shares
     the city name, so it can never be what makes one the right match.
+
+    A shared street *name* is not by itself enough when both sides are
+    numbered addresses: "51 W. Central Blvd" and "150 E Central Blvd. -
+    Garage" share "central" (and used to also share "blvd", before it joined
+    the stopword list), clearing the bar above with no check that 51 and 150,
+    or W and E, are different places on the same-named street five blocks
+    apart (found 2026-10-20 — a Sombr listing wrongly matched to an unrelated
+    garage this way, reporting that garage's spots as the listing's own). So
+    once two strings clear the word-overlap bar, if both also open with a
+    house number, that number (and the compass direction right after it, if
+    either side states one) has to agree too. A side with no leading number
+    — a named venue like "Tanger Outlet Lot" — skips this check entirely,
+    since it was never what the check is protecting against.
+
+    `candidate_address` is the number/direction source when the caller has
+    one separate from `candidate` (which is often "name address" or just
+    name, for the word-overlap match above) — ParkWhiz and Way.com's own
+    name fields routinely lead with a company or brand, not the street
+    number ("Parkway Corp - 229 Guilford Ave. Lot"), so reading the number
+    out of the combined string would silently miss it. Falls back to
+    `candidate` when no separate address is given.
     """
     ours, theirs = _lot_tokens(our, exclude), _lot_tokens(candidate, exclude)
     if not ours or not theirs:
         return False
     shared = {o for o in ours for t in theirs
               if o == t or (len(o) >= 5 and len(t) >= 5 and (o.startswith(t) or t.startswith(o)))}
-    if len(shared) >= 2:
-        return True
-    return any(len(w) >= 6 for w in shared)
+    matched = len(shared) >= 2 or any(len(w) >= 6 for w in shared)
+    if not matched:
+        return False
+    ours_lead = _address_lead(_extract_addr(our))
+    theirs_lead = _address_lead(candidate_address) if candidate_address else _address_lead(candidate)
+    if ours_lead and theirs_lead:
+        if ours_lead.group(1) != theirs_lead.group(1):
+            return False
+        if ours_lead.group(2) and theirs_lead.group(2) and ours_lead.group(2) != theirs_lead.group(2):
+            return False
+    return True
 
 
 def _stated_miles(section: str) -> Optional[float]:
@@ -839,7 +889,9 @@ def _pick_our_lot(results: list, our_section: str,
         if _section_matches(our_section, _spot_addr(r)) or _section_matches(our_section, _spot_name(r)):
             return r
     for r in results:
-        if _lot_name_matches(our_section, _spot_name(r)):
+        if _lot_name_matches(our_section, _spot_name(r), candidate_address=_spot_addr(r)):
+            logger.info("SpotHero match for %r relied on the name-only fallback -> %r (%s) — "
+                        "worth a human spot-check", our_section, _spot_name(r), _spot_addr(r))
             return r
     return None
 
@@ -1338,7 +1390,10 @@ def _pick_our_pw_lot(lots: list, our_section: str,
         if _section_matches(our_section, l["name"]) or _section_matches(our_section, l["address"]):
             return l
     for l in lots:
-        if _lot_name_matches(our_section, f'{l.get("name","")} {l.get("address","")}'):
+        if _lot_name_matches(our_section, f'{l.get("name","")} {l.get("address","")}',
+                             candidate_address=l.get("address", "")):
+            logger.info("ParkWhiz match for %r relied on the name-only fallback -> %r (%s) — "
+                        "worth a human spot-check", our_section, l.get("name"), l.get("address"))
             return l
     return None
 
@@ -1599,7 +1654,10 @@ def _pick_our_way_lot(lots: list, our_section: str,
                 _section_matches(our_section, lot.get("lot_name")):
             return lot
     for lot in lots:
-        if _lot_name_matches(our_section, lot.get("lot_name") or ""):
+        if _lot_name_matches(our_section, lot.get("lot_name") or "",
+                             candidate_address=lot.get("lot_address") or ""):
+            logger.info("Way.com match for %r relied on the name-only fallback -> %r (%s) — "
+                        "worth a human spot-check", our_section, lot.get("lot_name"), lot.get("lot_address"))
             return lot
     return None
 
