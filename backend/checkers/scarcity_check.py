@@ -850,32 +850,6 @@ def _spothero_window(event_date: str) -> tuple[str, str]:
     return (starts.strftime("%Y-%m-%dT%H:%M:%S"), ends.strftime("%Y-%m-%dT%H:%M:%S"))
 
 
-def _best_of_tied(candidates: list) -> dict:
-    """
-    When more than one result clears the same match tier, prefer one that
-    isn't reporting sold out.
-
-    SpotHero sometimes carries the same real garage under two separate
-    facility ids — "751 E Lombard St. (55 Market Pl.) - Harbor Park Garage"
-    and "751 E Lombard St. - Harbor Park Garage" are two different facility
-    ids for one Baltimore garage, and their own address fields even disagree
-    ("55 Market Place" vs "751 East Lombard Street"), so each independently
-    clears whichever match tier found it. Taking the first one arbitrarily
-    reported the garage sold out (0 of 20) while its twin, and SpotHero's own
-    site, showed it bookable — a Stagefront alert fired on this exact pairing
-    2026-10-22. Every candidate here already matched `our_section` on its own
-    terms before reaching this tie-break, so preferring the open one over a
-    same-tier sold-out twin isn't guessing at a different lot, just picking
-    the live one between two records of the same lot.
-    """
-    if len(candidates) == 1:
-        return candidates[0]
-    for r in candidates:
-        if _spot_scarcity(r).get("scarcity_level") != "sold_out":
-            return r
-    return candidates[0]
-
-
 def _pick_our_lot(results: list, our_section: str,
                   our_coords: Optional[tuple[float, float]]) -> Optional[dict]:
     """
@@ -895,7 +869,6 @@ def _pick_our_lot(results: list, our_section: str,
             key=lambda pair: pair[0],   # never fall through to comparing the dicts
         )
         token = _street_token(our_section)
-        tied = []
         for dist, r in near:
             if dist > _SAME_LOT_METRES:
                 break
@@ -907,25 +880,19 @@ def _pick_our_lot(results: list, our_section: str,
             # when it names none, position is all we have.
             if len(token) < 3:
                 if dist <= _EXACT_SPOT_METRES:
-                    tied.append(r)
+                    return r
                 continue
             if token in _normalize(f"{_spot_addr(r)} {_spot_name(r)}"):
-                tied.append(r)
-        if tied:
-            return _best_of_tied(tied)
+                return r
 
-    exact = [r for r in results
-             if _section_matches(our_section, _spot_addr(r)) or _section_matches(our_section, _spot_name(r))]
-    if exact:
-        return _best_of_tied(exact)
-
-    fallback = [r for r in results
-                if _lot_name_matches(our_section, _spot_name(r), candidate_address=_spot_addr(r))]
-    if fallback:
-        r = _best_of_tied(fallback)
-        logger.info("SpotHero match for %r relied on the name-only fallback -> %r (%s) — "
-                    "worth a human spot-check", our_section, _spot_name(r), _spot_addr(r))
-        return r
+    for r in results:
+        if _section_matches(our_section, _spot_addr(r)) or _section_matches(our_section, _spot_name(r)):
+            return r
+    for r in results:
+        if _lot_name_matches(our_section, _spot_name(r), candidate_address=_spot_addr(r)):
+            logger.info("SpotHero match for %r relied on the name-only fallback -> %r (%s) — "
+                        "worth a human spot-check", our_section, _spot_name(r), _spot_addr(r))
+            return r
     return None
 
 
