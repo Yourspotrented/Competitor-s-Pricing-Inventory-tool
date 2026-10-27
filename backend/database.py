@@ -646,11 +646,14 @@ def prune_old_data() -> dict:
     Called on startup (in a background thread) and then every 24 hours so
     scarcity.db never grows unboundedly on the Render persistent disk.
 
-    Retention policy — tuned to the data volumes each scheduler produces:
-      30 days  — lot-level readings (facility_lot_checks, events_lot_checks,
-                  scarcity_checks, lot_checks, our_spothero_inventory_snapshots)
-      60 days  — aggregate checks and our_inventory / facility_database snapshots
-      90 days  — price spikes and sold-out alerts (smaller volume; useful for audit)
+    Retention policy:
+       7 days  — all lot-level and aggregate scan readings, inventory snapshots
+                  (facility_lot_checks, events_lot_checks, scarcity_checks,
+                  lot_checks, our_spothero_inventory_snapshots,
+                  facility_competitor_checks, events_competitor_checks,
+                  our_inventory_snapshots, our_facility_database_snapshots)
+      14 days  — price spikes and sold-out alerts (smaller volume; kept a bit
+                  longer as a short audit trail for the team)
       5 most recent uploads/syncs for Lysted and Stagefront; the rest are removed
       geocode_cache and platform_credentials are never pruned (tiny, permanent value)
     """
@@ -659,25 +662,24 @@ def prune_old_data() -> dict:
 
     # SQLite stores datetimes as naive UTC strings — strip tzinfo before comparing.
     now = datetime.now(timezone.utc).replace(tzinfo=None)
-    cutoff_30 = now - timedelta(days=30)
-    cutoff_60 = now - timedelta(days=60)
-    cutoff_90 = now - timedelta(days=90)
+    cutoff_7  = now - timedelta(days=7)
+    cutoff_14 = now - timedelta(days=14)
 
     _PRUNE_RULES = [
         # (table, timestamp_column, cutoff) — highest-volume tables first
-        ("facility_lot_checks",              "checked_at",  cutoff_30),
-        ("events_lot_checks",                "checked_at",  cutoff_30),
-        ("scarcity_checks",                  "checked_at",  cutoff_30),
-        ("lot_checks",                       "checked_at",  cutoff_30),
-        ("our_spothero_inventory_snapshots", "checked_at",  cutoff_30),
-        ("facility_competitor_checks",       "checked_at",  cutoff_60),
-        ("events_competitor_checks",         "checked_at",  cutoff_60),
-        ("our_inventory_snapshots",          "checked_at",  cutoff_60),
-        ("our_facility_database_snapshots",  "checked_at",  cutoff_60),
-        ("price_spikes",                     "detected_at", cutoff_90),
-        ("facility_price_spikes",            "detected_at", cutoff_90),
-        ("events_price_spikes",              "detected_at", cutoff_90),
-        ("lysted_sold_out_alerts",           "detected_at", cutoff_90),
+        ("facility_lot_checks",              "checked_at",  cutoff_7),
+        ("events_lot_checks",                "checked_at",  cutoff_7),
+        ("scarcity_checks",                  "checked_at",  cutoff_7),
+        ("lot_checks",                       "checked_at",  cutoff_7),
+        ("our_spothero_inventory_snapshots", "checked_at",  cutoff_7),
+        ("facility_competitor_checks",       "checked_at",  cutoff_7),
+        ("events_competitor_checks",         "checked_at",  cutoff_7),
+        ("our_inventory_snapshots",          "checked_at",  cutoff_7),
+        ("our_facility_database_snapshots",  "checked_at",  cutoff_7),
+        ("price_spikes",                     "detected_at", cutoff_14),
+        ("facility_price_spikes",            "detected_at", cutoff_14),
+        ("events_price_spikes",              "detected_at", cutoff_14),
+        ("lysted_sold_out_alerts",           "detected_at", cutoff_14),
     ]
 
     summary: dict = {}
