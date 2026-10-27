@@ -46,19 +46,33 @@ def _run_loop() -> None:
     while not _stop_event.is_set():
         with _status_lock:
             _status = {"status": "running", "interval_hours": round(interval / 3600, 2)}
-        try:
-            summary = run_and_persist_lysted_scan(notify=True)
+        summary = None
+        last_error = None
+        for attempt in range(1, 4):
+            try:
+                summary = run_and_persist_lysted_scan(notify=True)
+                last_error = None
+                break
+            except Exception as exc:
+                last_error = exc
+                if "locked" in str(exc).lower() and attempt < 3:
+                    logger.warning("Lysted scan hit DB lock on attempt %d/3, retrying in 10s...", attempt)
+                    time.sleep(10.0)
+                else:
+                    break
+
+        if last_error is None and summary is not None:
             with _status_lock:
                 _status = {
                     "status": "idle", "interval_hours": round(interval / 3600, 2),
                     "last_run_summary": summary, "last_run_ok": True,
                 }
-        except Exception as exc:
-            logger.error("Scheduled Lysted scan failed: %s", exc)
+        else:
+            logger.error("Scheduled Lysted scan failed: %s", last_error)
             with _status_lock:
                 _status = {
                     "status": "idle", "interval_hours": round(interval / 3600, 2),
-                    "last_run_error": str(exc), "last_run_ok": False,
+                    "last_run_error": str(last_error), "last_run_ok": False,
                 }
 
         waited = 0.0

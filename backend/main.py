@@ -107,11 +107,11 @@ _prune_log = logging.getLogger("db_prune")
 def _run_prune_on_startup() -> None:
     """One-shot prune called in a background thread at startup.
 
-    Waits 10 s so the app finishes booting and the /health endpoint
-    responds before we start a potentially long VACUUM operation.
+    Waits 2 minutes so all initial startup scans (facility, events, etc.)
+    complete and save cleanly before housekeeping starts.
     """
     import time
-    time.sleep(10)
+    time.sleep(120)
     try:
         summary = prune_old_data()
         total = sum(v for v in summary.values() if isinstance(v, int))

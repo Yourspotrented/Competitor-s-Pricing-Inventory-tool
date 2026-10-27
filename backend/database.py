@@ -17,7 +17,7 @@ except ImportError:
 _DB_PATH = os.getenv("DATABASE_PATH", "./scarcity.db")
 _ENGINE = create_engine(
     f"sqlite:///{_DB_PATH}",
-    connect_args={"check_same_thread": False, "timeout": 30.0},
+    connect_args={"check_same_thread": False, "timeout": 60.0},
 )
 
 @event.listens_for(_ENGINE, "connect")
@@ -25,6 +25,7 @@ def _set_sqlite_pragma(dbapi_connection, connection_record):
     cursor = dbapi_connection.cursor()
     cursor.execute("PRAGMA journal_mode=WAL")
     cursor.execute("PRAGMA synchronous=NORMAL")
+    cursor.execute("PRAGMA busy_timeout=60000")
     cursor.close()
 
 _SessionFactory = sessionmaker(bind=_ENGINE, autocommit=False, autoflush=False)
@@ -684,67 +685,89 @@ def prune_old_data() -> dict:
 
     summary: dict = {}
 
-    with _ENGINE.begin() as conn:
-        for table, ts_col, cutoff in _PRUNE_RULES:
-            result = conn.exec_driver_sql(
-                f"DELETE FROM {table} WHERE {ts_col} < ?", (cutoff,)
-            )
-            deleted = result.rowcount
-            if deleted:
-                _log.info("prune_old_data: %s — removed %d rows", table, deleted)
-            summary[table] = deleted
+    # Prune each table in its own separate transaction so locks are held for milliseconds,
+    # never blocking concurrent reads/writes from scheduled scan jobs.
+    for table, ts_col, cutoff in _PRUNE_RULES:
+        try:
+            with _ENGINE.begin() as conn:
+                result = conn.exec_driver_sql(
+                    f"DELETE FROM {table} WHERE {ts_col} < ?", (cutoff,)
+                )
+                deleted = result.rowcount
+                if deleted:
+                    _log.info("prune_old_data: %s — removed %d rows", table, deleted)
+                summary[table] = deleted
+        except Exception as exc:
+            _log.warning("prune_old_data: skipping table %s due to lock/error: %s", table, exc)
 
-        # Keep only the 5 most recent Lysted uploads + their listing rows.
-        old_upload_ids = [
-            row[0] for row in conn.exec_driver_sql(
-                "SELECT id FROM lysted_uploads "
-                "WHERE id NOT IN "
-                "(SELECT id FROM lysted_uploads ORDER BY uploaded_at DESC LIMIT 5)"
-            ).fetchall()
-        ]
-        if old_upload_ids:
-            ph = ",".join("?" * len(old_upload_ids))
-            conn.exec_driver_sql(
-                f"DELETE FROM lysted_listings WHERE upload_id IN ({ph})",
-                old_upload_ids,
-            )
-            conn.exec_driver_sql(
-                f"DELETE FROM lysted_uploads WHERE id IN ({ph})",
-                old_upload_ids,
-            )
-            _log.info("prune_old_data: removed %d old Lysted upload(s)", len(old_upload_ids))
-            summary["lysted_uploads_removed"] = len(old_upload_ids)
+    # Keep only the 5 most recent Lysted uploads + their listing rows.
+    try:
+        with _ENGINE.begin() as conn:
+            old_upload_ids = [
+                row[0] for row in conn.exec_driver_sql(
+                    "SELECT id FROM lysted_uploads "
+                    "WHERE id NOT IN "
+                    "(SELECT id FROM lysted_uploads ORDER BY uploaded_at DESC LIMIT 5)"
+                ).fetchall()
+            ]
+            if old_upload_ids:
+                ph = ",".join("?" * len(old_upload_ids))
+                conn.exec_driver_sql(
+                    f"DELETE FROM lysted_listings WHERE upload_id IN ({ph})",
+                    old_upload_ids,
+                )
+                conn.exec_driver_sql(
+                    f"DELETE FROM lysted_uploads WHERE id IN ({ph})",
+                    old_upload_ids,
+                )
+                _log.info("prune_old_data: removed %d old Lysted upload(s)", len(old_upload_ids))
+                summary["lysted_uploads_removed"] = len(old_upload_ids)
+    except Exception as exc:
+        _log.warning("prune_old_data: failed to prune lysted: %s", exc)
 
-        # Keep only the 5 most recent Stagefront syncs + their listing rows.
-        old_sync_ids = [
-            row[0] for row in conn.exec_driver_sql(
-                "SELECT id FROM stagefront_syncs "
-                "WHERE id NOT IN "
-                "(SELECT id FROM stagefront_syncs ORDER BY synced_at DESC LIMIT 5)"
-            ).fetchall()
-        ]
-        if old_sync_ids:
-            ph = ",".join("?" * len(old_sync_ids))
-            conn.exec_driver_sql(
-                f"DELETE FROM stagefront_listings WHERE sync_id IN ({ph})",
-                old_sync_ids,
-            )
-            conn.exec_driver_sql(
-                f"DELETE FROM stagefront_syncs WHERE id IN ({ph})",
-                old_sync_ids,
-            )
-            _log.info("prune_old_data: removed %d old Stagefront sync(s)", len(old_sync_ids))
-            summary["stagefront_syncs_removed"] = len(old_sync_ids)
+    # Keep only the 5 most recent Stagefront syncs + their listing rows.
+    try:
+        with _ENGINE.begin() as conn:
+            old_sync_ids = [
+                row[0] for row in conn.exec_driver_sql(
+                    "SELECT id FROM stagefront_syncs "
+                    "WHERE id NOT IN "
+                    "(SELECT id FROM stagefront_syncs ORDER BY synced_at DESC LIMIT 5)"
+                ).fetchall()
+            ]
+            if old_sync_ids:
+                ph = ",".join("?" * len(old_sync_ids))
+                conn.exec_driver_sql(
+                    f"DELETE FROM stagefront_listings WHERE sync_id IN ({ph})",
+                    old_sync_ids,
+                )
+                conn.exec_driver_sql(
+                    f"DELETE FROM stagefront_syncs WHERE id IN ({ph})",
+                    old_sync_ids,
+                )
+                _log.info("prune_old_data: removed %d old Stagefront sync(s)", len(old_sync_ids))
+                summary["stagefront_syncs_removed"] = len(old_sync_ids)
+    except Exception as exc:
+        _log.warning("prune_old_data: failed to prune stagefront: %s", exc)
+
+    total = sum(v for v in summary.values() if isinstance(v, int))
 
     # VACUUM must run outside any transaction in SQLite — use a raw connection
-    # in autocommit mode so freed pages are returned to the OS immediately.
-    raw = _ENGINE.raw_connection()
-    try:
-        raw.isolation_level = None   # sqlite3 autocommit
-        raw.execute("VACUUM")
-        _log.info("prune_old_data: VACUUM complete")
-    finally:
-        raw.close()
+    # in autocommit mode. Only run if substantial rows were removed (> 100) to avoid
+    # unnecessary exclusive locking when few or no rows were deleted.
+    if total > 100:
+        raw = _ENGINE.raw_connection()
+        try:
+            raw.isolation_level = None   # sqlite3 autocommit
+            raw.execute("PRAGMA busy_timeout=60000")
+            raw.execute("VACUUM")
+            _log.info("prune_old_data: VACUUM complete")
+        except Exception as exc:
+            _log.warning("prune_old_data: VACUUM skipped due to active locks: %s", exc)
+        finally:
+            raw.close()
+    else:
+        _log.info("prune_old_data: VACUUM skipped (only %d rows pruned)", total)
 
     total = sum(v for v in summary.values() if isinstance(v, int))
     _log.info("prune_old_data: finished — %d total rows removed", total)
