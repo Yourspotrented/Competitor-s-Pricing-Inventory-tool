@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import (
     Boolean, Column, DateTime, Float, Integer, String, create_engine, event
@@ -636,6 +636,117 @@ class GeocodeCache(Base):
     lat = Column(Float, nullable=True)   # NULL = confirmed "not found", cached too (avoids re-asking)
     lon = Column(Float, nullable=True)
     cached_at = Column(DateTime, default=utcnow)
+
+
+def prune_old_data() -> dict:
+    """
+    Delete old rows from high-volume scan tables and VACUUM the database to
+    reclaim disk space back to the OS.
+
+    Called on startup (in a background thread) and then every 24 hours so
+    scarcity.db never grows unboundedly on the Render persistent disk.
+
+    Retention policy — tuned to the data volumes each scheduler produces:
+      30 days  — lot-level readings (facility_lot_checks, events_lot_checks,
+                  scarcity_checks, lot_checks, our_spothero_inventory_snapshots)
+      60 days  — aggregate checks and our_inventory / facility_database snapshots
+      90 days  — price spikes and sold-out alerts (smaller volume; useful for audit)
+      5 most recent uploads/syncs for Lysted and Stagefront; the rest are removed
+      geocode_cache and platform_credentials are never pruned (tiny, permanent value)
+    """
+    import logging
+    _log = logging.getLogger(__name__)
+
+    # SQLite stores datetimes as naive UTC strings — strip tzinfo before comparing.
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    cutoff_30 = now - timedelta(days=30)
+    cutoff_60 = now - timedelta(days=60)
+    cutoff_90 = now - timedelta(days=90)
+
+    _PRUNE_RULES = [
+        # (table, timestamp_column, cutoff) — highest-volume tables first
+        ("facility_lot_checks",              "checked_at",  cutoff_30),
+        ("events_lot_checks",                "checked_at",  cutoff_30),
+        ("scarcity_checks",                  "checked_at",  cutoff_30),
+        ("lot_checks",                       "checked_at",  cutoff_30),
+        ("our_spothero_inventory_snapshots", "checked_at",  cutoff_30),
+        ("facility_competitor_checks",       "checked_at",  cutoff_60),
+        ("events_competitor_checks",         "checked_at",  cutoff_60),
+        ("our_inventory_snapshots",          "checked_at",  cutoff_60),
+        ("our_facility_database_snapshots",  "checked_at",  cutoff_60),
+        ("price_spikes",                     "detected_at", cutoff_90),
+        ("facility_price_spikes",            "detected_at", cutoff_90),
+        ("events_price_spikes",              "detected_at", cutoff_90),
+        ("lysted_sold_out_alerts",           "detected_at", cutoff_90),
+    ]
+
+    summary: dict = {}
+
+    with _ENGINE.begin() as conn:
+        for table, ts_col, cutoff in _PRUNE_RULES:
+            result = conn.exec_driver_sql(
+                f"DELETE FROM {table} WHERE {ts_col} < ?", (cutoff,)
+            )
+            deleted = result.rowcount
+            if deleted:
+                _log.info("prune_old_data: %s — removed %d rows", table, deleted)
+            summary[table] = deleted
+
+        # Keep only the 5 most recent Lysted uploads + their listing rows.
+        old_upload_ids = [
+            row[0] for row in conn.exec_driver_sql(
+                "SELECT id FROM lysted_uploads "
+                "WHERE id NOT IN "
+                "(SELECT id FROM lysted_uploads ORDER BY uploaded_at DESC LIMIT 5)"
+            ).fetchall()
+        ]
+        if old_upload_ids:
+            ph = ",".join("?" * len(old_upload_ids))
+            conn.exec_driver_sql(
+                f"DELETE FROM lysted_listings WHERE upload_id IN ({ph})",
+                old_upload_ids,
+            )
+            conn.exec_driver_sql(
+                f"DELETE FROM lysted_uploads WHERE id IN ({ph})",
+                old_upload_ids,
+            )
+            _log.info("prune_old_data: removed %d old Lysted upload(s)", len(old_upload_ids))
+            summary["lysted_uploads_removed"] = len(old_upload_ids)
+
+        # Keep only the 5 most recent Stagefront syncs + their listing rows.
+        old_sync_ids = [
+            row[0] for row in conn.exec_driver_sql(
+                "SELECT id FROM stagefront_syncs "
+                "WHERE id NOT IN "
+                "(SELECT id FROM stagefront_syncs ORDER BY synced_at DESC LIMIT 5)"
+            ).fetchall()
+        ]
+        if old_sync_ids:
+            ph = ",".join("?" * len(old_sync_ids))
+            conn.exec_driver_sql(
+                f"DELETE FROM stagefront_listings WHERE sync_id IN ({ph})",
+                old_sync_ids,
+            )
+            conn.exec_driver_sql(
+                f"DELETE FROM stagefront_syncs WHERE id IN ({ph})",
+                old_sync_ids,
+            )
+            _log.info("prune_old_data: removed %d old Stagefront sync(s)", len(old_sync_ids))
+            summary["stagefront_syncs_removed"] = len(old_sync_ids)
+
+    # VACUUM must run outside any transaction in SQLite — use a raw connection
+    # in autocommit mode so freed pages are returned to the OS immediately.
+    raw = _ENGINE.raw_connection()
+    try:
+        raw.isolation_level = None   # sqlite3 autocommit
+        raw.execute("VACUUM")
+        _log.info("prune_old_data: VACUUM complete")
+    finally:
+        raw.close()
+
+    total = sum(v for v in summary.values() if isinstance(v, int))
+    _log.info("prune_old_data: finished — %d total rows removed", total)
+    return summary
 
 
 def _ensure_column(table: str, column: str, ddl: str) -> None:

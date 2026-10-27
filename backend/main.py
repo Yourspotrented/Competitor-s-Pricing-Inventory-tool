@@ -19,7 +19,7 @@ from database import (
     OurInventorySnapshot, OurFacilityDatabaseSnapshot, OurSpotheroInventorySnapshot,
     EventsCompetitorCheck, EventsPriceSpike, EventsLowInventoryAlert,
     LystedListing, LystedSoldOutAlert, StagefrontListing,
-    create_tables, get_db, get_session,
+    create_tables, get_db, get_session, prune_old_data,
 )
 from orchestrator import run_scan, get_current_run, request_stop
 from checkers.scarcity_check import check_scarcity, list_event_lots
@@ -97,9 +97,49 @@ app.add_middleware(
 )
 
 
+# ---------------------------------------------------------------------------
+# Data-retention helpers — keep scarcity.db from filling the Render disk.
+# ---------------------------------------------------------------------------
+
+_prune_log = logging.getLogger("db_prune")
+
+
+def _run_prune_on_startup() -> None:
+    """One-shot prune called in a background thread at startup.
+
+    Waits 10 s so the app finishes booting and the /health endpoint
+    responds before we start a potentially long VACUUM operation.
+    """
+    import time
+    time.sleep(10)
+    try:
+        summary = prune_old_data()
+        total = sum(v for v in summary.values() if isinstance(v, int))
+        _prune_log.info("Startup prune complete — %d rows removed, VACUUM done", total)
+    except Exception as exc:  # never crash the whole app over a housekeeping failure
+        _prune_log.warning("Startup prune failed: %s", exc)
+
+
+def _daily_prune_scheduler() -> None:
+    """Loop that runs prune_old_data() every 24 hours to keep disk usage flat."""
+    import time
+    while True:
+        time.sleep(24 * 3600)
+        try:
+            summary = prune_old_data()
+            total = sum(v for v in summary.values() if isinstance(v, int))
+            _prune_log.info("Daily prune complete — %d rows removed", total)
+        except Exception as exc:
+            _prune_log.warning("Daily prune failed: %s", exc)
+
+
 @app.on_event("startup")
 def on_startup():
     create_tables()
+    # Housekeeping: prune old scan rows + VACUUM at startup, then every 24h.
+    # Both run in daemon threads so the app and /health respond immediately.
+    threading.Thread(target=_run_prune_on_startup, daemon=True).start()
+    threading.Thread(target=_daily_prune_scheduler, daemon=True).start()
     start_scheduler()
     start_events_scheduler()
     start_lysted_scheduler()
@@ -127,7 +167,24 @@ def dashboard_config():
     return PlainTextResponse('window.API_BASE = "";\n', media_type="application/javascript")
 
 
+@app.post("/api/admin/prune")
+def trigger_prune():
+    """
+    Manually trigger a database prune + VACUUM.
+    Runs synchronously in the request (takes a few seconds for VACUUM on large DBs).
+    Useful after a disk-full incident to reclaim space immediately without
+    waiting for the next automatic 24-hour run.
+    """
+    try:
+        summary = prune_old_data()
+        total = sum(v for v in summary.values() if isinstance(v, int))
+        return {"status": "ok", "rows_removed": total, "detail": summary}
+    except Exception as exc:
+        return {"status": "error", "error": str(exc)}
+
+
 app.mount("/static", StaticFiles(directory=os.path.join(_HERE, "static")), name="static")
+
 
 
 # ---------------------------------------------------------------------------
