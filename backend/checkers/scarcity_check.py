@@ -367,6 +367,10 @@ def _venue_key(name: str) -> str:
     n = _clean_venue(name or "")
     n = re.sub(r"\([^)]*\)", " ", n)
     n = re.sub(r"(?i)\band\b|&", " ", n)
+    # A middle initial: SpotHero's "James L Knight Center" against our "James
+    # Knight Center" matched neither way round, so its David Bisbal event was
+    # never found and its event-only lots never searched ("not listed").
+    n = re.sub(r"(?<=[A-Za-z]{2})\s+[A-Za-z]\.?(?=\s+[A-Za-z]{2})", " ", n)
     return _normalize(n)
 
 
@@ -495,6 +499,51 @@ def _street_token(section: str) -> str:
     s = _addr_for_geocode(section) or section
     s = re.sub(r"^\s*\d+[a-z]?\s+", " ", s, flags=re.I)   # leading house number
     return _normalize(_STREET_NOISE.sub(" ", s))
+
+
+def _house_number_conflict(our_section: str, candidate_text: str) -> bool:
+    """
+    Does the candidate put a different house number on our street?
+
+    Same street is not same lot. Our "1611 Caroline St." was matched to
+    SpotHero's "1601 Caroline St" 19 m away and to ParkWhiz's sold-out
+    "1608 Caroline St." — both inside the position tolerance and both
+    containing "caroline" — and the alerts reported those lots' inventory as
+    ours. "5295 S Procyon St" took "5490 S Procyon St"'s 0 of 15, and
+    "751 E Lombard St" took "221 W Lombard St"'s 0 of 20, telling the team to
+    deactivate listings whose own lots were on sale.
+
+    A conflict needs both sides to number our street and none of the
+    candidate's numbers to be ours. A candidate that names our number anywhere
+    ("751 E Lombard St. (55 Market Pl.)"), or that numbers no address on our
+    street (a named garage), is not a conflict — position and text decide.
+    """
+    lead = re.match(r"\s*(\d+)", _addr_for_geocode(our_section) or "")
+    token = _street_token(our_section)
+    if not lead or len(token) < 3:
+        return False
+    ours = int(lead.group(1))
+    text = (candidate_text or "").lower()
+    # An address range covers every number in it: "1600-1620 Caroline St" is ours at 1611.
+    for a, b in re.findall(r"\b(\d+)\s*-\s*(\d+)\b", text):
+        if int(a) <= ours <= int(b):
+            return False
+    words = re.findall(r"[a-z0-9]+", text)
+    numbers = set()
+    for i, w in enumerate(words):
+        # A house number is a bare number with our street name within the next
+        # few words: "1601 caroline", "29 nw 1st". A short number naming a lot,
+        # level or gate ("Lot 5 - Caroline St") is not one. Only short ones:
+        # callers join name and address, so ParkWhiz's "Block 348 Lot" +
+        # "1608 Caroline St." puts "lot" right before a real house number.
+        if (w.isdigit() and any(_normalize(x) == token for x in words[i + 1:i + 5])
+                and not (len(w) <= 2 and i > 0 and words[i - 1] in _NOT_HOUSE_NUMBER_PREFIX)):
+            numbers.add(int(w))
+    return bool(numbers) and ours not in numbers
+
+
+_NOT_HOUSE_NUMBER_PREFIX = {"lot", "lots", "level", "levels", "gate", "block", "spot", "section",
+                            "zone", "deck", "garage", "no", "number", "pier", "area"}
 
 
 def _geocode_our_lot(our_section: str, city: str = "", state: str = "") -> Optional[tuple[float, float]]:
@@ -691,7 +740,93 @@ def _find_spothero_event(event_name: str, event_date: str, event_venue: str) -> 
         hit = _pick(_spothero_event_search(q))
         if hit:
             return hit
+
+    # The search above only ever returns the ten soonest events, so a date
+    # months out is unreachable through it: Zach Bryan at Allegiant Stadium on
+    # 2027-07-16 and Calvin Harris at Toyota Center on 2027-04-23 were never
+    # found, and without the event SpotHero prices nothing for event-only lots
+    # (the "Smalley Lot" read 50 of 50 with no rate). The performer's page
+    # lists the whole tour with event ids.
+    for ev in _spothero_performer_events(clean_name):
+        if not _venue_matches(clean_venue, ev.get("destination_title", "")):
+            continue
+        try:
+            ev_dt = datetime.fromisoformat((ev.get("starts_local") or "")[:19])
+        except ValueError:
+            continue
+        if target_dt and abs((ev_dt - target_dt).days) > 1:
+            continue
+        hit = _pick([d for d in [_spothero_event_by_id(ev.get("id"))] if d])
+        if hit:
+            return hit
     return None
+
+
+_SH_WEB_HEADERS = {
+    "accept": "text/html",
+    "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+                  "Chrome/146.0.0.0 Safari/537.36",
+}
+_SH_PERFORMER_CACHE: dict = {}
+_SH_PERFORMER_LOCK = threading.Lock()
+_SH_PERFORMER_TTL = timedelta(hours=6)
+_NEXT_DATA = re.compile(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', re.S)
+
+
+def _performer_slugs(clean_name: str) -> list:
+    """SpotHero performer page slugs to try: the full name, then the headliner
+    alone ("Usher and Chris Brown" -> "usher")."""
+    names = [clean_name]
+    head = re.split(r"(?i)\s+(?:and|&|with|w/|x|feat\.?|ft\.?|vs\.?)\s+|\s*[,:/]\s*", clean_name)[0].strip()
+    if head and head.lower() != clean_name.lower():
+        names.append(head)
+    slugs = []
+    for n in names:
+        s = re.sub(r"[^a-z0-9]+", "-", n.lower()).strip("-")
+        if s and s not in slugs:
+            slugs.append(f"{s}-parking")
+    return slugs
+
+
+def _spothero_performer_events(clean_name: str) -> list:
+    """Every SpotHero event on the performer's tour ([] when there's no page). Cached per performer."""
+    import json
+    out: list = []
+    for slug in _performer_slugs(clean_name):
+        now = datetime.now()
+        with _SH_PERFORMER_LOCK:
+            cached = _SH_PERFORMER_CACHE.get(slug)
+        if cached and now - cached[0] < _SH_PERFORMER_TTL:
+            out += cached[1]
+            continue
+        resp = _throttled_get(_spothero_throttle_obj, f"https://spothero.com/performers/{slug}",
+                              headers=_SH_WEB_HEADERS, timeout=20)
+        if resp is None:
+            continue   # transient — don't cache, try again next scan
+        events: list = []
+        if resp.ok:
+            m = _NEXT_DATA.search(resp.text)
+            try:
+                props = json.loads(m.group(1))["props"]["pageProps"] if m else {}
+                events = ((props.get("performer") or {}).get("events")) or []
+            except (ValueError, KeyError, TypeError):
+                events = []
+        with _SH_PERFORMER_LOCK:
+            _SH_PERFORMER_CACHE[slug] = (now, events)
+        out += events
+    return out
+
+
+def _spothero_event_by_id(event_id) -> Optional[dict]:
+    """One SpotHero event, in the same shape /events/search returns."""
+    if not event_id:
+        return None
+    resp = _throttled_get(_spothero_throttle_obj, f"{_SPOTHERO_API}/events/{event_id}",
+                          headers=_SPOTHERO_HEADERS, timeout=15)
+    try:
+        return resp.json().get("data") if resp is not None and resp.ok else None
+    except ValueError:
+        return None
 
 
 def _spot_price(r: dict) -> Optional[float]:
@@ -775,17 +910,31 @@ def geocode_by_spothero_facility_id(facility_id: str) -> Optional[tuple[float, f
     return coords
 
 
+# SpotHero's reasons for a lot not being bookable that say nothing about
+# whether it sold out: not on sale yet for a date this far out, closed at that
+# hour, or blacked out for the event. Such lots report available_spaces 0
+# alongside "Sold Out" — "5490 S Procyon St" read 0 of 15 and "221 W Lombard
+# St" 0 of 20 for 2027 events while selling nothing yet — or a full count,
+# reading as plenty left on a lot nobody can book.
+_SPOTHERO_NOT_ON_SALE = {"Search Too Far In Future", "Outside Hours", "Blacked Out"}
+
+
 def _spot_scarcity(r: dict) -> dict:
     """Extract exact spots-left / capacity from a SpotHero result."""
     avail = r.get("availability", {}) or {}
     inventory = r.get("facility", {}).get("common", {}).get("inventory", {}) or {}
     spots_left = avail.get("available_spaces")
     capacity = inventory.get("default_quantity")
+    reasons = set(avail.get("unavailable_reasons") or [])
     pct = None
     if isinstance(spots_left, (int, float)) and isinstance(capacity, (int, float)) and capacity > 0:
         pct = round(spots_left / capacity * 100, 1)
 
     if spots_left is None:
+        level = "unknown"
+    elif reasons & _SPOTHERO_NOT_ON_SALE:
+        # Not bookable for a reason other than selling out: neither a
+        # sell-out nor spots anyone can buy.
         level = "unknown"
     elif spots_left == 0 and not (isinstance(capacity, (int, float)) and capacity > 0):
         # 0 of 0: SpotHero returns this for lots it has no inventory figure
@@ -795,6 +944,11 @@ def _spot_scarcity(r: dict) -> dict:
         level = "unknown"
     elif spots_left == 0:
         level = "sold_out"
+    elif avail.get("available") is False:
+        # Spaces on paper but not bookable ("No Qualifying Rates": no price
+        # for this window). Reporting it as available showed the team a lot
+        # they could not find on SpotHero — it hides unbookable lots.
+        level = "unknown"
     elif pct is not None and pct <= 15:
         level = "limited"
     else:
@@ -860,7 +1014,12 @@ def _pick_our_lot(results: list, our_section: str,
     they are. This is the closest the Lysted flow can get to the facility
     flow's exact facility-id comparison (clustering._is_ours), which needs an
     id these rows don't carry.
+
+    A lot numbered differently on our street is never ours, however close —
+    see _house_number_conflict.
     """
+    results = [r for r in results
+               if not _house_number_conflict(our_section, f"{_spot_name(r)} {_spot_addr(r)}")]
     if our_coords:
         near = sorted(
             ((_haversine_m(our_coords, c), r)
@@ -1112,7 +1271,7 @@ def list_spothero_lots(event_name: str, event_venue: str, event_date: str, our_s
             # flag, so competitors' moves would be sent as our own.
             "is_our_lot": bool(our_section) and not _is_generic_section(our_section) and (
                 _section_matches(our_section, _spot_addr(r)) or _section_matches(our_section, _spot_name(r))
-            ),
+            ) and not _house_number_conflict(our_section, f"{_spot_name(r)} {_spot_addr(r)}"),
             **scarcity,
         })
     lots.sort(key=lambda l: (l["spots_left"] if l["spots_left"] is not None else 10**9))
@@ -1504,7 +1663,10 @@ def _query_parkwhiz_quotes(lat: float, lon: float, start_time: str, end_time: st
 def _pick_our_pw_lot(lots: list, our_section: str,
                      our_coords: Optional[tuple[float, float]]) -> Optional[dict]:
     """_pick_our_lot's counterpart for ParkWhiz quotes, which carry their own
-    entrance coordinates. Same rule: position first, then text."""
+    entrance coordinates. Same rule: position first, then text, and never a
+    lot numbered differently on our street."""
+    lots = [l for l in lots
+            if not _house_number_conflict(our_section, f"{l.get('name', '')} {l.get('address', '')}")]
     if our_coords:
         near = sorted(((_haversine_m(our_coords, l["coords"]), l)
                        for l in lots if l.get("coords")),
@@ -1568,18 +1730,20 @@ def _fetch_parkwhiz_lots(event_name: str, event_date: str, event_venue: str, our
     return _query_parkwhiz_quotes(lat, lon, start_time, end_time, event_id=pw_event_id)
 
 
-# ParkWhiz's event rate covers the event plus this much either side ("This
-# event rate includes 2 hours before and 2 hours after event" on its checkout).
-# Ask for more and the event rate is not offered: the quote falls back to a
-# regular rate, often around double — 555 Parking Garage read $53.98 against a
-# $30.99 event rate when the window was a fixed 7 PM-midnight.
-_PW_EVENT_MARGIN = timedelta(hours=2)
+# The quote window is the event's own start to end, nothing added. A lot only
+# offers its event rate for a window that fits inside that lot's own event
+# window, and lots set those differently: 555 Parking Garage (Golden 1 Center)
+# allows 2 hours either side, the Allegiant Stadium lots only 1 hour after.
+# Asking for more than a lot allows drops it to a regular rate — 555 Parking
+# Garage read $53.98 against its $30.99 event rate under a fixed 7 PM-midnight —
+# or drops it from the results entirely: event +/-2h returned 4 Allegiant lots
+# where the exact event times return 15, ours among them.
 # For when ParkWhiz's own event isn't found and only our start time is known.
 _PW_ASSUMED_EVENT_LENGTH = timedelta(hours=3)
 
 
 def _parkwhiz_window(event_date: str, pw_event: Optional[dict]) -> tuple[str, str]:
-    """The quote window for an event, as local wall-clock times."""
+    """The quote window for an event — its start to its end, as local wall-clock times."""
     start = end = None
     if pw_event:
         try:
@@ -1597,7 +1761,7 @@ def _parkwhiz_window(event_date: str, pw_event: Optional[dict]) -> tuple[str, st
             start = start.replace(hour=19)   # a date with no time: assume an evening event
         end = start + _PW_ASSUMED_EVENT_LENGTH
     fmt = "%Y-%m-%dT%H:%M:%S"
-    return (start - _PW_EVENT_MARGIN).strftime(fmt), (end + _PW_EVENT_MARGIN).strftime(fmt)
+    return start.strftime(fmt), end.strftime(fmt)
 
 
 def fetch_parkwhiz_lots_near(lat: float, lon: float, start_hour: int = 10, end_hour: int = 22) -> tuple[list, Optional[str]]:
@@ -1726,7 +1890,7 @@ def list_parkwhiz_lots(event_name: str, event_date: str, event_venue: str, our_s
             "quote_kind": l.get("quote_kind"),
             "is_our_lot": bool(our_section) and not _is_generic_section(our_section) and (
                 _section_matches(our_section, l["name"]) or _section_matches(our_section, l["address"])
-            ),
+            ) and not _house_number_conflict(our_section, f"{l['name']} {l['address']}"),
         })
     priority = {"sold_out": 0, "limited": 1, "ok": 2, "unknown": 3}
     result.sort(key=lambda l: priority.get(l["scarcity_level"], 3))
@@ -1788,8 +1952,11 @@ def _pick_our_way_lot(lots: list, our_section: str,
     """
     Which Way.com lot is ours? Same rule as SpotHero: a street named in our
     section must appear in the lot's name or address, whatever the distance,
-    so a neighbouring lot a few metres away is never mistaken for ours.
+    so a neighbouring lot a few metres away is never mistaken for ours — nor
+    one numbered differently on our street.
     """
+    lots = [l for l in lots
+            if not _house_number_conflict(our_section, f"{l.get('lot_name') or ''} {l.get('lot_address') or ''}")]
     token = _street_token(our_section)
     if our_coords:
         near = sorted(

@@ -86,7 +86,10 @@ def _buyable(platform_detail: Dict[str, Any]) -> Optional[int]:
     if sh_spots is not None and sh_level in ("ok", "limited"):
         return int(sh_spots)
     # SpotHero doesn't have it. ParkWhiz can only confirm a sell-out.
-    if parkwhiz.get("level") == "sold_out" and sh_level in ("not_found", None, "unknown"):
+    # "unknown" is not "doesn't have it": SpotHero reads unknown for a lot it
+    # lists but isn't selling yet for the date, is closed at that hour, or
+    # failed to answer — the lot may well still be bought there.
+    if parkwhiz.get("level") == "sold_out" and sh_level in ("not_found", None):
         return 0
     return None
 
