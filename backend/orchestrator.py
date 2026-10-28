@@ -249,6 +249,15 @@ def run_scan(
                             LotCheck.lot_name == lot.get("lot_name"),
                             LotCheck.lot_address == lot.get("lot_address"),
                         )
+                    # Like for like: ParkWhiz's event rate and its regular rate
+                    # are different products, and comparing one with the other
+                    # reported 555 Parking Garage at +100% ($26.99 -> $53.98)
+                    # when its event rate was $30.99. Rows recorded before
+                    # quote_kind existed have none, so they never pair with a
+                    # new ParkWhiz reading — no false spike on the first scan.
+                    quote_kind = lot.get("quote_kind")
+                    prev_q = prev_q.filter(LotCheck.quote_kind == quote_kind if quote_kind
+                                           else LotCheck.quote_kind.is_(None))
                     prev = prev_q.order_by(LotCheck.checked_at.desc()).first()
 
                     if prev is not None and prev.price and prev.price > 0:
@@ -290,6 +299,7 @@ def run_scan(
                         availability_status=lot.get("availability_status"),
                         scarcity_level=lot.get("scarcity_level"),
                         is_our_lot=lot.get("is_our_lot"),
+                        quote_kind=quote_kind,
                         checked_at=now,
                     ))
 

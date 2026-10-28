@@ -1252,11 +1252,98 @@ def _find_parkwhiz_venue_id(event_venue: str, city: str = "", state: str = "") -
     return None
 
 
-def _find_parkwhiz_event_id(event_name: str, event_date: str, event_venue: str,
-                             coords: Optional[tuple[float, float]] = None,
-                             city: str = "", state: str = "") -> Optional[int]:
+# ParkWhiz's /events/ does honour a start-time range (starting_after /
+# starting_before), which no name or venue search does. One date's events
+# nationally are a few pages, so they are fetched once per date and kept for
+# a while: every listing on that date is then matched without another call.
+_PW_DAY_EVENTS: dict = {}
+_PW_DAY_EVENTS_LOCK = threading.Lock()
+_PW_DAY_EVENTS_TTL = timedelta(hours=1)
+_PW_DAY_EVENTS_MAX_PAGES = 30
+
+
+def _pw_events_around(day: datetime) -> list:
+    """Every ParkWhiz event starting within a day and a half either side of `day`."""
+    key = day.date()
+    now = datetime.now()
+    with _PW_DAY_EVENTS_LOCK:
+        cached = _PW_DAY_EVENTS.get(key)
+        if cached and now - cached[0] < _PW_DAY_EVENTS_TTL:
+            return cached[1]
+    # The filter's timezone is ParkWhiz's to decide and events carry their own
+    # offsets, so the range is generous and the +/-1 day check below is exact.
+    start = datetime.combine(key, datetime.min.time())
+    q = (f"starting_after:{(start - timedelta(hours=12)).strftime('%Y-%m-%dT%H:%M:%S')} "
+         f"starting_before:{(start + timedelta(hours=36)).strftime('%Y-%m-%dT%H:%M:%S')}")
+    events: list = []
+    for page in range(1, _PW_DAY_EVENTS_MAX_PAGES + 1):
+        resp = _throttled_get(_parkwhiz_throttle_obj, f"{_PARKWHIZ_API}/events/",
+                              params={"q": q, "sort": "start_time", "per_page": 100, "page": page,
+                                      "zoom": "pw:venue"},
+                              headers=_PARKWHIZ_HEADERS, timeout=15)
+        try:
+            batch = resp.json() if resp is not None and resp.ok else None
+        except Exception:
+            batch = None
+        if batch is None:
+            return events   # transient failure: use what we have, don't cache it
+        if not isinstance(batch, list) or not batch:
+            break
+        events.extend(batch)
+        if len(batch) < 100:
+            break
+    with _PW_DAY_EVENTS_LOCK:
+        _PW_DAY_EVENTS[key] = (now, events)
+    return events
+
+
+def _find_parkwhiz_event_by_date(clean_name: str, target_dt: Optional[datetime], event_venue: str,
+                                 city: str = "", state: str = "") -> Optional[dict]:
+    """
+    Our event among ParkWhiz's events on its date: name, date and place must
+    all agree. The place check is what keeps a touring act from matching its
+    show in another city on the next night.
+    """
+    if target_dt is None:
+        return None
+    best, best_gap = None, None
+    for ev in _pw_events_around(target_dt):
+        if not _event_name_matches(clean_name, ev.get("name", "")):
+            continue
+        try:
+            ev_dt = datetime.fromisoformat(ev["start_time"][:19])
+        except (KeyError, TypeError, ValueError):
+            continue
+        gap = abs(ev_dt - target_dt)
+        if gap > timedelta(days=1):
+            continue
+        venue = (ev.get("_embedded") or {}).get("pw:venue") or {}
+        same_place = _venue_matches(event_venue, venue.get("name", "")) or (
+            bool(city) and _normalize(venue.get("city") or "") == _normalize(city)
+            and (not state or _normalize(venue.get("state") or "") == _normalize(state)))
+        if not same_place:
+            continue
+        if best_gap is None or gap < best_gap:
+            best, best_gap = ev, gap
+    return best
+
+
+def _find_parkwhiz_event(event_name: str, event_date: str, event_venue: str,
+                         coords: Optional[tuple[float, float]] = None,
+                         city: str = "", state: str = "") -> Optional[dict]:
+    """
+    ParkWhiz's own record of our event ({id, start_time, end_time, ...}), or
+    None. The times matter as much as the id: the event rate is only quoted
+    for a window that fits inside them (see _parkwhiz_window).
+    """
     target_dt = _parse_event_dt(event_date) if event_date else None
     clean_name = _clean_event_name(event_name)
+
+    # By date first: a few cached pages per date, where the venue route below
+    # pages a directory of 40,000+ venues and still missed Golden 1 Center.
+    ev = _find_parkwhiz_event_by_date(clean_name, target_dt, event_venue, city, state)
+    if ev is not None:
+        return ev
 
     venue_id = _find_parkwhiz_venue_id(event_venue, city, state)
     if venue_id is not None:
@@ -1280,7 +1367,7 @@ def _find_parkwhiz_event_id(event_name: str, event_date: str, event_venue: str,
                         continue
                 except Exception:
                     pass
-            return ev["id"]
+            return ev
 
     if coords is None:
         coords = _geocode_venue(event_venue, "")
@@ -1310,13 +1397,54 @@ def _find_parkwhiz_event_id(event_name: str, event_date: str, event_venue: str,
                     continue
             except Exception:
                 pass
-        return ev["id"]
+        return ev
     return None
+
+
+def _is_event_rate(option: dict, event_id: Optional[int]) -> bool:
+    """Is this purchase option ParkWhiz's event rate for our event?"""
+    if event_id is None:
+        return False
+    for seg in option.get("pricing_segments") or []:
+        ev = seg.get("event")
+        ev_id = ev.get("id") if isinstance(ev, dict) else ev
+        if ev_id is not None and str(ev_id) == str(event_id):
+            return True
+    return False
+
+
+def _pick_pw_option(opts: list, event_id: Optional[int]) -> dict:
+    """
+    Which of a lot's purchase options is "the" price.
+
+    Taking opts[0] read the same lot at different prices from one scan to the
+    next whenever ParkWhiz listed more than one option (valet vs self-park,
+    event rate vs regular rate) and returned them in another order. Prefer the
+    event rate — what a buyer for our event is sold — then one still on sale,
+    then the cheapest, which is stable however the list is ordered.
+    """
+    def _price(o: dict) -> float:
+        try:
+            return float((o.get("price") or {}).get("USD"))
+        except (TypeError, ValueError):
+            return float("inf")
+
+    def _gone(o: dict) -> bool:
+        return (o.get("space_availability") or {}).get("status") in ("sold_out", "unavailable")
+
+    return min(opts, key=lambda o: (not _is_event_rate(o, event_id), _gone(o), _price(o)))
 
 
 def _query_parkwhiz_quotes(lat: float, lon: float, start_time: str, end_time: str,
                             event_id: Optional[int] = None) -> tuple[list, Optional[str]]:
-    """Raw ParkWhiz /quotes/ call for a lat/lon + time window, optionally scoped to an event_id."""
+    """
+    Raw ParkWhiz /quotes/ call for a lat/lon + time window, optionally scoped to an event_id.
+
+    Each lot carries quote_kind: "event_rate" when its price is the event's
+    own rate, else "standard". The two are different products — the event
+    rate ($30.99 for 555 Parking Garage) vs a regular rate that can be twice
+    that — so a price is only ever compared with one of the same kind.
+    """
     delta = 0.02
     bounds = f"{lat+delta},{lon-delta},{lat-delta},{lon+delta}"
     q_param = f"anchor_coordinates:{lat},{lon} search_type:transient bounds:{bounds}"
@@ -1354,9 +1482,11 @@ def _query_parkwhiz_quotes(lat: float, lon: float, start_time: str, end_time: st
         opts = q.get("purchase_options", [])
         if not opts:
             continue
-        price_raw = opts[0].get("price", {}).get("USD")
+        opt = _pick_pw_option(opts, event_id)
+        price_raw = opt.get("price", {}).get("USD")
         price = float(price_raw) if price_raw else None
-        status = (opts[0].get("space_availability") or {}).get("status", "unknown")
+        status = (opt.get("space_availability") or {}).get("status", "unknown")
+        quote_kind = "event_rate" if _is_event_rate(opt, event_id) else "standard"
 
         coords = None
         entrances = loc.get("entrances") or []
@@ -1366,7 +1496,8 @@ def _query_parkwhiz_quotes(lat: float, lon: float, start_time: str, end_time: st
                 coords = (c[0], c[1])
 
         if name or addr:
-            lots.append({"name": name, "address": addr, "price": price, "status": status, "coords": coords})
+            lots.append({"name": name, "address": addr, "price": price, "status": status,
+                         "coords": coords, "quote_kind": quote_kind})
     return lots, None
 
 
@@ -1407,7 +1538,8 @@ def _fetch_parkwhiz_lots(event_name: str, event_date: str, event_venue: str, our
 
     coords = _geocode_venue(event_venue, our_section, city, state) \
         or _geocode_our_lot(our_section, city, state)
-    pw_event_id = _find_parkwhiz_event_id(event_name, event_date, event_venue, coords, city, state)
+    pw_event = _find_parkwhiz_event(event_name, event_date, event_venue, coords, city, state)
+    pw_event_id = pw_event["id"] if pw_event else None
     if pw_event_id is None and coords is None:
         # No event match and nowhere to anchor a bounds search either —
         # nothing left to try.
@@ -1432,14 +1564,40 @@ def _fetch_parkwhiz_lots(event_name: str, event_date: str, event_venue: str, our
         coords = (_MSG_LAT, _MSG_LON)
     lat, lon = coords
 
-    target_dt = _parse_event_dt(event_date) if event_date else None
-    if target_dt:
-        start_time = target_dt.strftime("%Y-%m-%dT19:00:00")
-        end_time = (target_dt + timedelta(days=1)).strftime("%Y-%m-%dT00:00:00")
-    else:
-        start_time = end_time = ""
-
+    start_time, end_time = _parkwhiz_window(event_date, pw_event)
     return _query_parkwhiz_quotes(lat, lon, start_time, end_time, event_id=pw_event_id)
+
+
+# ParkWhiz's event rate covers the event plus this much either side ("This
+# event rate includes 2 hours before and 2 hours after event" on its checkout).
+# Ask for more and the event rate is not offered: the quote falls back to a
+# regular rate, often around double — 555 Parking Garage read $53.98 against a
+# $30.99 event rate when the window was a fixed 7 PM-midnight.
+_PW_EVENT_MARGIN = timedelta(hours=2)
+# For when ParkWhiz's own event isn't found and only our start time is known.
+_PW_ASSUMED_EVENT_LENGTH = timedelta(hours=3)
+
+
+def _parkwhiz_window(event_date: str, pw_event: Optional[dict]) -> tuple[str, str]:
+    """The quote window for an event, as local wall-clock times."""
+    start = end = None
+    if pw_event:
+        try:
+            # Keep ParkWhiz's local wall-clock time; drop the UTC offset, as
+            # the quote request is made in local time too.
+            start = datetime.fromisoformat(pw_event["start_time"][:19])
+            end = datetime.fromisoformat(pw_event["end_time"][:19])
+        except (KeyError, TypeError, ValueError):
+            start = end = None
+    if start is None or end is None or end <= start:
+        start = _parse_event_dt(event_date) if event_date else None
+        if start is None:
+            return "", ""
+        if (start.hour, start.minute) == (0, 0):
+            start = start.replace(hour=19)   # a date with no time: assume an evening event
+        end = start + _PW_ASSUMED_EVENT_LENGTH
+    fmt = "%Y-%m-%dT%H:%M:%S"
+    return (start - _PW_EVENT_MARGIN).strftime(fmt), (end + _PW_EVENT_MARGIN).strftime(fmt)
 
 
 def fetch_parkwhiz_lots_near(lat: float, lon: float, start_hour: int = 10, end_hour: int = 22) -> tuple[list, Optional[str]]:
@@ -1565,6 +1723,7 @@ def list_parkwhiz_lots(event_name: str, event_date: str, event_venue: str, our_s
             "percent_remaining": None,
             "availability_status": l["status"],
             "scarcity_level": _level(l["status"]),
+            "quote_kind": l.get("quote_kind"),
             "is_our_lot": bool(our_section) and not _is_generic_section(our_section) and (
                 _section_matches(our_section, l["name"]) or _section_matches(our_section, l["address"])
             ),

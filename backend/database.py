@@ -96,6 +96,10 @@ class LotCheck(Base):
     availability_status = Column(String(20), nullable=True)      # ParkWhiz only
     scarcity_level = Column(String(20), nullable=True, index=True)
     is_our_lot = Column(Boolean, nullable=True)
+    # ParkWhiz only: "event_rate" or "standard" — two different products at
+    # very different prices, so a spike compares only readings of one kind.
+    # Null on SpotHero rows and on ParkWhiz rows from before this was recorded.
+    quote_kind = Column(String(20), nullable=True)
 
     checked_at = Column(DateTime, default=utcnow, index=True)
 
@@ -791,6 +795,7 @@ def create_tables() -> None:
     Base.metadata.create_all(bind=_ENGINE)
     _ensure_column("scarcity_checks", "source", "VARCHAR(20)")
     _ensure_column("lot_checks", "lot_id", "VARCHAR(50)")
+    _ensure_column("lot_checks", "quote_kind", "VARCHAR(20)")
     _ensure_column("price_spikes", "is_our_lot", "BOOLEAN")
     _ensure_column("lysted_sold_out_alerts", "passes_secured", "INTEGER")
     _ensure_column("lysted_sold_out_alerts", "passes_left", "INTEGER")

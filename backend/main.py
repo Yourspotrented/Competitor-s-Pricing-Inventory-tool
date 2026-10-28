@@ -259,6 +259,7 @@ def event_lots(
                     availability_status=lot.get("availability_status"),
                     scarcity_level=lot.get("scarcity_level"),
                     is_our_lot=lot.get("is_our_lot"),
+                    quote_kind=lot.get("quote_kind"),
                 ))
             db.commit()
         finally:
