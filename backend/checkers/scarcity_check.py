@@ -1848,8 +1848,12 @@ def _check_parkwhiz(event_name: str, event_date: str, event_venue: str, our_sect
             # comparing against the raw word here said is_available=True for
             # a lot the scarcity_level right next to it called sold out
             # (found 2026-10-20 testing the "unavailable" fix above).
+            # quote_kind travels with the price: a standard rate is a
+            # different product from the event rate, and the margin check
+            # (margin.py) must not price a listing off it.
             return {**base, "is_available": level != "sold_out", "price": l["price"],
-                    "availability_status": l["status"], "scarcity_level": level}
+                    "availability_status": l["status"], "scarcity_level": level,
+                    "quote_kind": l.get("quote_kind")}
         # Other lots exist for this event but not our specific lot.
         return {**base, "is_available": False, "scarcity_level": "not_found",
                 "error": "our lot not found among ParkWhiz quotes"}

@@ -518,3 +518,53 @@ def notify_lysted_summary(stats: Dict[str, int], sold_out: List[Dict[str, Any]],
 
     return _post(url, _envelope(body),
                  f"Lysted summary: {len(sold_out)} sold out, {len(spikes)} spike(s), {len(low_inventory)} low inventory")
+
+
+# ---------------------------------------------------------------------------
+# Margin alerts (margin.py / margin_report.py)
+# ---------------------------------------------------------------------------
+
+def _margin_text(r: Dict[str, Any]) -> str:
+    when = _event_when(r.get("event_date"))
+    line = (f"**{r.get('event_name') or 'Event'}**{' — ' + when if when else ''} · {r.get('section') or 'Unknown lot'}  \n"
+            f"Selling {_money(r.get('our_price'))}, costs {_money(r.get('buy_price'))} on "
+            f"{_platform(r.get('buy_platform'))} (margin {_money(r.get('margin'))}) → "
+            f"**raise to {_money(r.get('suggested_price'))}**")
+    if r.get("needs_review"):
+        line += f"  \n⚠️ Check before changing the price: {r.get('review_note') or 'see the dashboard'}"
+    return line
+
+
+def notify_margins(new_under: List[Dict[str, Any]], under_total: int, min_margin: float,
+                   source: str = "Stagefront",
+                   webhook_env_var: str = "STAGEFRONT_MARGIN_TEAMS_WEBHOOK_URL",
+                   fallback_env_var: str = "STAGEFRONT_TEAMS_WEBHOOK_URL") -> bool:
+    """
+    One card per scan naming the listings that have newly fallen under the
+    minimum margin (or whose needed price moved), with the price that
+    restores it. Silent when nothing is new — the dashboard keeps the full
+    list, and an hourly repeat of the same listings would bury the new ones.
+
+    Its own group (2026-10-29), falling back to the source's scan summary
+    group when that isn't set. Report-only: says what to change, changes nothing.
+    """
+    if not new_under:
+        return False
+    url = _webhook_url(webhook_env_var) or _webhook_url(fallback_env_var)
+    if not url:
+        logger.info("%s / %s not set — %d margin alert(s) not reported",
+                    webhook_env_var, fallback_env_var, len(new_under))
+        return False
+
+    review = sum(1 for r in new_under if r.get("needs_review"))
+    totals = [("Newly under margin", len(new_under)), (f"Under ${min_margin:.0f} margin in total", under_total)]
+    if review:
+        totals.append(("Need a look first", review))
+    body = [_header(f"💲 {source}: {len(new_under)} listing{'s' if len(new_under) != 1 else ''} "
+                    f"under the ${min_margin:.0f} margin"),
+            _totals(totals),
+            _section("Raise these prices")]
+    body += _lines(sorted(new_under, key=lambda r: r.get("margin") or 0), _margin_text, MAX_SOLD_OUT_LINES)
+    body.append(_note("Report only — the tool has not changed any price. "
+                      f"Full list in the dashboard ({source} → Margins)."))
+    return _post(url, _envelope(body), f"{source} margins: {len(new_under)} newly under")

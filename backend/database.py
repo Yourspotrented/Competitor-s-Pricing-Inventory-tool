@@ -69,6 +69,11 @@ class ScarcityCheck(Base):
     # column with ALTER TABLE — create_all alone never adds columns.
     source = Column(String(20), nullable=True, index=True)
 
+    # ParkWhiz only: "event_rate" | "standard" — which product `price` is for,
+    # same meaning as LotCheck.quote_kind. NULL for other platforms and for
+    # rows written before it existed. margin.py ignores a "standard" price.
+    quote_kind = Column(String(20), nullable=True)
+
     checked_at = Column(DateTime, default=utcnow, index=True)
 
 
@@ -543,6 +548,47 @@ class LystedSoldOutAlert(Base):
     notified = Column(Boolean, default=False)
 
 
+class MarginCheck(Base):
+    """
+    One listing's margin decision from one scan (margin.py / margin_report.py):
+    our price against what its matched lot cost to buy in that same scan.
+    Every listing gets a row each scan, not only the ones under margin, so
+    the latest scan is the complete picture. Report-only — nothing has acted
+    on these.
+    """
+    __tablename__ = "margin_checks"
+
+    id = Column(Integer, primary_key=True)
+    source = Column(String(20), nullable=False, index=True)      # "stagefront" today
+    listing_key = Column(String(400), nullable=False, index=True)
+    event_key = Column(String(400), nullable=True, index=True)
+    event_name = Column(String(500), nullable=True)
+    event_venue = Column(String(500), nullable=True)
+    event_date = Column(String(100), nullable=True)
+    section = Column(String(500), nullable=True)
+    quantity = Column(Integer, nullable=True)
+    passes_in_hand = Column(Integer, nullable=True)
+
+    our_price = Column(Float, nullable=True)
+    buy_price = Column(Float, nullable=True)                     # cheapest bookable matched reading
+    buy_platform = Column(String(30), nullable=True)
+    margin = Column(Float, nullable=True)                        # our_price - buy_price
+    floor_price = Column(Float, nullable=True)                   # buy_price + the minimum margin
+    suggested_price = Column(Float, nullable=True)               # set for "raise" only
+    action = Column(String(20), nullable=False, index=True)      # "ok" | "raise" | "skip" | "no_data"
+    reason = Column(String(200), nullable=True)
+    needs_review = Column(Boolean, default=False)
+
+    # What each buying platform read, so a row can be checked by eye.
+    spothero_price = Column(Float, nullable=True)
+    spothero_level = Column(String(20), nullable=True)
+    parkwhiz_price = Column(Float, nullable=True)
+    parkwhiz_level = Column(String(20), nullable=True)
+    parkwhiz_quote_kind = Column(String(20), nullable=True)
+
+    checked_at = Column(DateTime, default=utcnow, index=True)
+
+
 class StagefrontSync(Base):
     """
     One pull of our Stagefront inventory (QueryEvents + QueryEventInventoryAll
@@ -656,7 +702,8 @@ def prune_old_data() -> dict:
                   (facility_lot_checks, events_lot_checks, scarcity_checks,
                   lot_checks, our_spothero_inventory_snapshots,
                   facility_competitor_checks, events_competitor_checks,
-                  our_inventory_snapshots, our_facility_database_snapshots)
+                  our_inventory_snapshots, our_facility_database_snapshots,
+                  margin_checks)
       14 days  — price spikes and sold-out alerts (smaller volume; kept a bit
                   longer as a short audit trail for the team)
       5 most recent uploads/syncs for Lysted and Stagefront; the rest are removed
@@ -681,6 +728,7 @@ def prune_old_data() -> dict:
         ("events_competitor_checks",         "checked_at",  cutoff_7),
         ("our_inventory_snapshots",          "checked_at",  cutoff_7),
         ("our_facility_database_snapshots",  "checked_at",  cutoff_7),
+        ("margin_checks",                    "checked_at",  cutoff_7),
         ("price_spikes",                     "detected_at", cutoff_14),
         ("facility_price_spikes",            "detected_at", cutoff_14),
         ("events_price_spikes",              "detected_at", cutoff_14),
@@ -794,6 +842,7 @@ def _ensure_column(table: str, column: str, ddl: str) -> None:
 def create_tables() -> None:
     Base.metadata.create_all(bind=_ENGINE)
     _ensure_column("scarcity_checks", "source", "VARCHAR(20)")
+    _ensure_column("scarcity_checks", "quote_kind", "VARCHAR(20)")
     _ensure_column("lot_checks", "lot_id", "VARCHAR(50)")
     _ensure_column("lot_checks", "quote_kind", "VARCHAR(20)")
     _ensure_column("price_spikes", "is_our_lot", "BOOLEAN")

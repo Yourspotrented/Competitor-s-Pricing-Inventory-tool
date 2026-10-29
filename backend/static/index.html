@@ -528,6 +528,7 @@
   <div class="view-tabs" style="padding: 16px 28px 0;">
     <button class="view-tab-btn active" id="viewStagefrontListBtn" style="font-size:13px;padding:6px 14px;">Listings</button>
     <button class="view-tab-btn" id="viewStagefrontAlertsBtn" style="font-size:13px;padding:6px 14px;">Sold-out Alerts</button>
+    <button class="view-tab-btn" id="viewStagefrontMarginsBtn" style="font-size:13px;padding:6px 14px;">Margins</button>
   </div>
   <div id="stagefrontSchedulerStatus" class="scan-status-line" style="padding: 8px 28px 0;"></div>
 
@@ -575,6 +576,29 @@
       </table>
     </div>
     <div id="stagefrontAlertsEmptyState" class="empty" style="display:none;">No listings have gone sold-out at source in the latest check. This view shows one check at a time, so an empty table means every live listing can still be fulfilled.</div>
+  </div>
+
+  <div id="stagefrontMarginsSubview" style="display:none;">
+    <div class="facility-controls">
+      <input type="search" id="marginSearch" placeholder="Filter by event, venue, or lot…" />
+      <button class="facility-filter-btn margin-filter-btn active" data-filter="all">All</button>
+      <button class="facility-filter-btn margin-filter-btn" data-filter="raise">Under margin</button>
+      <button class="facility-filter-btn margin-filter-btn" data-filter="review">Needs review</button>
+      <button class="facility-filter-btn margin-filter-btn" data-filter="no_data">No data</button>
+      <button class="facility-filter-btn margin-filter-btn" data-filter="ok">OK</button>
+    </div>
+    <div style="padding: 12px 28px 0;">
+      <div id="marginCaption" class="sub" style="margin-bottom:10px;"></div>
+      <div class="tbl-shell">
+        <table>
+          <thead>
+            <tr><th>Event</th><th>Date</th><th>Lot</th><th>Qty</th><th>Our price</th><th title="Our matched lot on SpotHero, this scan">SpotHero</th><th title="Our matched lot on ParkWhiz, this scan. Only the event rate counts — a standard rate is a different product">ParkWhiz</th><th title="Cheapest of the two that can be bought right now">Buy price</th><th title="Our price minus the buy price">Margin</th><th title="Buy price plus the minimum margin">Suggested</th><th>Status</th></tr>
+          </thead>
+          <tbody id="marginRows"></tbody>
+        </table>
+      </div>
+      <div id="marginEmptyState" class="empty" style="display:none;">No margin check yet. It runs with every Stagefront check — click "Check Now", or wait for the next hourly run.</div>
+    </div>
   </div>
 </main>
 
@@ -2468,6 +2492,8 @@ async function loadStagefront() {
   STAGEFRONT_ROWS = data.listings || [];
   renderStagefrontCaption(data.sync, STAGEFRONT_ROWS);
   renderStagefront();
+  // Refresh / a finished "Check Now" both land here — keep an open Margins tab current too.
+  if ($('stagefrontMarginsSubview').style.display !== 'none') loadMargins();
 }
 
 async function loadStagefrontAlerts() {
@@ -2496,15 +2522,104 @@ async function loadStagefrontAlerts() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Margins — each listing's price against what its lot cost to buy in the
+// latest scan (margin.py). Report-only: nothing here changes a price.
+// ---------------------------------------------------------------------------
+
+let MARGIN_DATA = { rows: [] };
+let marginFilter = 'all';
+
+function marginPlatformCell(price, level, quoteKind) {
+  if (!level) return '<span class="muted">—</span>';
+  const badge = `<span class="badge ${level}">${level.replace('_', ' ')}</span>`;
+  const note = quoteKind === 'standard' ? '<br><span class="muted" title="Not the event rate — ignored for the buy price">standard rate</span>' : '';
+  return `${price != null ? fmtMoney(price) + ' ' : ''}${badge}${note}`;
+}
+
+function marginStatusCell(r) {
+  if (r.action === 'raise') {
+    return '<span class="badge sold_out">Raise</span>' +
+      (r.needs_review ? ` <span class="badge limited" title="${r.reason || ''}">Review</span><br><span class="muted">${(r.reason || '').split('; ').slice(1).join('; ')}</span>` : '');
+  }
+  if (r.action === 'ok') return '<span class="badge ok">OK</span>';
+  const label = r.action === 'skip' ? 'Skipped' : 'No data';
+  return `<span class="badge unknown" title="${r.reason || ''}">${label}</span><br><span class="muted">${r.reason || ''}</span>`;
+}
+
+function renderMarginCaption() {
+  const d = MARGIN_DATA, el = $('marginCaption');
+  if (!d.checked_at) { el.textContent = ''; return; }
+  const c = d.counts || {};
+  el.textContent = `Checked ${fmtDate(d.checked_at)} · ${c.raise || 0} under the $${d.min_margin} margin` +
+    (d.needs_review ? ` (${d.needs_review} need review)` : '') +
+    ` · ${c.ok || 0} OK · ${c.no_data || 0} no data · Report only — prices are not changed automatically`;
+}
+
+function renderMargins() {
+  const q = $('marginSearch').value.trim().toLowerCase();
+  const all = MARGIN_DATA.rows || [];
+  const rows = all
+    .filter(r => marginFilter === 'all' || (marginFilter === 'review' ? r.needs_review : r.action === marginFilter))
+    .filter(r => !q || `${r.event_name} ${r.event_venue} ${r.section}`.toLowerCase().includes(q));
+
+  const tbody = $('marginRows');
+  tbody.innerHTML = '';
+  $('marginEmptyState').style.display = all.length ? 'none' : 'block';
+  if (all.length && !rows.length) {
+    tbody.innerHTML = `<tr><td colspan="11" class="empty" style="padding:30px;">No listings match this filter.</td></tr>`;
+    return;
+  }
+  for (const r of rows) {
+    const tr = document.createElement('tr');
+    if (r.action === 'raise') tr.className = 'spike-row';
+    tr.innerHTML = `
+      <td>${r.event_name || '—'}</td>
+      <td class="muted">${r.event_date ? fmtDate(r.event_date) : '—'}</td>
+      <td>${r.section || '—'}</td>
+      <td class="price">${r.quantity ?? '—'}</td>
+      <td class="price">${fmtMoney(r.our_price)}</td>
+      <td>${marginPlatformCell(r.spothero_price, r.spothero_level)}</td>
+      <td>${marginPlatformCell(r.parkwhiz_price, r.parkwhiz_level, r.parkwhiz_quote_kind)}</td>
+      <td class="price">${fmtMoney(r.buy_price)}${r.buy_platform ? `<br><span class="muted">${r.buy_platform}</span>` : ''}</td>
+      <td class="price">${r.margin != null && r.margin < 0 ? '-' + fmtMoney(-r.margin) : fmtMoney(r.margin)}</td>
+      <td class="price">${r.suggested_price != null ? '<strong>' + fmtMoney(r.suggested_price) + '</strong>' : '—'}</td>
+      <td>${marginStatusCell(r)}</td>
+    `;
+    tbody.appendChild(tr);
+  }
+}
+
+async function loadMargins() {
+  const res = await fetch('/api/stagefront/margins');
+  MARGIN_DATA = await res.json();
+  renderMarginCaption();
+  renderMargins();
+}
+
+$('marginSearch').addEventListener('input', renderMargins);
+$('stagefrontMarginsSubview').querySelectorAll('.margin-filter-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    $('stagefrontMarginsSubview').querySelectorAll('.margin-filter-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    marginFilter = btn.dataset.filter;
+    renderMargins();
+  });
+});
+
 function switchStagefrontSubview(view) {
   $('stagefrontListSubview').style.display = view === 'list' ? '' : 'none';
   $('stagefrontAlertsSubview').style.display = view === 'alerts' ? '' : 'none';
+  $('stagefrontMarginsSubview').style.display = view === 'margins' ? '' : 'none';
   $('viewStagefrontListBtn').classList.toggle('active', view === 'list');
   $('viewStagefrontAlertsBtn').classList.toggle('active', view === 'alerts');
+  $('viewStagefrontMarginsBtn').classList.toggle('active', view === 'margins');
   if (view === 'alerts') loadStagefrontAlerts();
+  if (view === 'margins') loadMargins();
 }
 $('viewStagefrontListBtn').addEventListener('click', () => switchStagefrontSubview('list'));
 $('viewStagefrontAlertsBtn').addEventListener('click', () => switchStagefrontSubview('alerts'));
+$('viewStagefrontMarginsBtn').addEventListener('click', () => switchStagefrontSubview('margins'));
 
 $('stagefrontExportAlertsBtn').addEventListener('click', async () => {
   const btn = $('stagefrontExportAlertsBtn');

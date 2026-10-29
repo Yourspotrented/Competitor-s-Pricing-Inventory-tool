@@ -203,6 +203,7 @@ def run_scan(
                     percent_remaining=platform_result.get("percent_remaining"),
                     availability_status=platform_result.get("availability_status"),
                     scarcity_level=platform_result.get("scarcity_level"),
+                    quote_kind=platform_result.get("quote_kind"),
                     error=platform_result.get("error"),
                     checked_at=datetime.now(timezone.utc),
                 )

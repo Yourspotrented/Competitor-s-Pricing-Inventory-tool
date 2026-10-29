@@ -45,11 +45,13 @@ from typing import Any, Dict, Optional
 
 from database import LystedSoldOutAlert, get_session
 import listing_actions
+from margin import MIN_MARGIN_DOLLARS
+from margin_report import run_margin_check
 from lysted_scan_runner import (
     collect_price_spikes, detect_low_inventory_crossings, detect_sold_out_crossings, scan_stats,
 )
 from stagefront_listings import SOURCE, get_latest_sync, load_active_listings
-from teams_notify import notify_deactivations, notify_lysted_summary
+from teams_notify import notify_deactivations, notify_lysted_summary, notify_margins
 
 logger = logging.getLogger(__name__)
 
@@ -150,6 +152,17 @@ def _run_locked(notify: bool, event_limit: Optional[int]) -> Dict[str, Any]:
     finally:
         db.close()
 
+    # Margin check (report-only): our price against this scan's buy prices.
+    # Runs after the alerts above are committed, in its own session, and
+    # never raises — a failure here can't cost a sold-out alert.
+    margins = run_margin_check(listings, scan_started, SOURCE)
+    margin_notified = False
+    if notify and margins["status"] == "ok":
+        try:
+            margin_notified = notify_margins(margins["new_under"], margins["under_margin"], MIN_MARGIN_DOLLARS)
+        except Exception as exc:
+            logger.error("Margin Teams card failed (scan unaffected): %s", exc)
+
     out = {
         **summary,
         "sync_id": latest.id,
@@ -164,6 +177,11 @@ def _run_locked(notify: bool, event_limit: Optional[int]) -> Dict[str, Any]:
         "deactivation_skipped": len(carried["skipped"]),
         "deactivation_failed": len(carried["failed"]),
         "writes_enabled": carried["enabled"],
+        "margin_status": margins["status"],
+        "margin_under": margins.get("under_margin", 0),
+        "margin_no_data": margins.get("no_data", 0),
+        "margin_new_under": len(margins.get("new_under", [])),
+        "margin_notified": margin_notified,
     }
     logger.info("Stagefront scan + sold-out detection complete: %s", out)
     return out

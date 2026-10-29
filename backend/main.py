@@ -37,6 +37,7 @@ from lysted_scan_runner import run_and_persist_lysted_scan
 from lysted_scheduler import start_lysted_scheduler, get_lysted_scheduler_status
 from stagefront_listings import get_latest_sync as get_latest_stagefront_sync, sync_now as stagefront_sync_now
 from stagefront_scan_runner import run_and_persist_stagefront_scan
+from margin_report import latest_margins
 from stagefront_scheduler import start_stagefront_scheduler, get_stagefront_scheduler_status
 from our_inventory import fetch_our_inventory
 from our_facility_database import load_facility_database
@@ -1631,6 +1632,16 @@ def stagefront_listings_view(db: Session = Depends(get_db)):
             "last_checked_at": max(stamps).isoformat() if stamps else None,
         })
     return {"sync": _sync_dict(sync), "listings": out}
+
+
+@app.get("/api/stagefront/margins")
+def stagefront_margins(db: Session = Depends(get_db)):
+    """
+    The latest scan's margin check (margin_report.py): each listing's price
+    against what its lot cost to buy in that scan, and the price that would
+    restore the minimum margin. Report-only — nothing here changes a price.
+    """
+    return latest_margins(db, "stagefront")
 
 
 @app.post("/api/stagefront/scan")
